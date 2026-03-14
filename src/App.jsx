@@ -10,57 +10,39 @@ async function lookupBarcode(code) {
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         messages: [{
           role: "user",
-          content: `Search the web for sneaker UPC barcode: ${code}. Find the exact sneaker this barcode belongs to. Return ONLY a raw JSON object with these fields: brand, model, colorway, size. No markdown, no explanation, just the JSON. Example: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":"10"}. If not found return {"brand":"","model":"","colorway":"","size":""}.`
+          content: `Search the web for UPC barcode ${code} to identify which sneaker it belongs to. After searching, respond with ONLY a JSON object like: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":""}. Leave size empty. No markdown, no explanation, just JSON.`
         }]
       })
     });
-    const responseText = await response.text();
-    if (!response.ok) throw new Error(`API error ${response.status}: ${responseText}`);
-    const data = JSON.parse(responseText);
-
-    // Build messages for potential follow-up (web search results need a second pass)
-    const messages = [
-      { role: "user", content: `Search the web for sneaker UPC barcode: ${code}. Find the exact sneaker this barcode belongs to. Return ONLY a raw JSON object with these fields: brand, model, colorway, size. No markdown, no explanation, just the JSON. Example: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":"10"}. If not found return {"brand":"","model":"","colorway":"","size":""}.` },
-      { role: "assistant", content: data.content }
-    ];
-
-    // If stopped for tool_use, send back tool results and get final answer
-    if (data.stop_reason === "tool_use") {
-      const toolResults = data.content
-        .filter(b => b.type === "web_search_result" || b.type === "server_tool_use")
-        .map(b => ({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(b.content || b.input || "") }));
-
-      const followUp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-        body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 1024,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          messages: [...messages, { role: "user", content: "Based on the search results, now return ONLY the JSON object with brand, model, colorway, size." }]
-        })
-      });
-      const followData = await followUp.json();
-      const text = (followData.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-      const jsonMatch = text.match(/\{[^{}]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.brand || parsed.model) return { ...parsed, barcode: code };
-      }
-    } else {
-      const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-      const jsonMatch = text.match(/\{[^{}]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.brand || parsed.model) return { ...parsed, barcode: code };
-      }
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`API error ${response.status}: ${err}`);
+    }
+    const data = await response.json();
+    console.log("Full response:", JSON.stringify(data).slice(0, 500));
+    // Extract all text blocks from response (web search returns text after searching)
+    const text = (data.content || [])
+      .filter(b => b.type === "text")
+      .map(b => b.text)
+      .join("");
+    console.log("Text content:", text);
+    const jsonMatch = text.match(/\{[^}]+\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      console.log("Parsed:", parsed);
+      if (parsed.brand || parsed.model) return { ...parsed, barcode: code };
     }
   } catch (e) {
     console.error("Lookup error:", e);
