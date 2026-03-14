@@ -6,8 +6,15 @@ const EMPTY_FORM = {
   purchasePrice: "", currentValue: "", condition: "Excellent", photo: null, photoUrl: "", barcode: ""
 };
 
-async function lookupBarcode(code) {
+async function lookupBarcode(code, styleCode = "") {
   try {
+    const searchTerm = styleCode
+      ? `Nike style code ${styleCode} OR UPC ${code} sneaker`
+      : `UPC barcode ${code} sneaker shoe`;
+    const prompt = styleCode
+      ? `Search the web for sneaker with style code "${styleCode}" (UPC: ${code}). Identify the exact sneaker. Respond with ONLY a JSON object: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":""}. No markdown, just JSON.`
+      : `Search the web for sneaker UPC barcode ${code}. Identify the exact sneaker. Respond with ONLY a JSON object: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":""}. No markdown, just JSON.`;
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -20,10 +27,7 @@ async function lookupBarcode(code) {
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages: [{
-          role: "user",
-          content: `Search the web for UPC barcode ${code} to identify which sneaker it belongs to. After searching, respond with ONLY a JSON object like: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":""}. Leave size empty. No markdown, no explanation, just JSON.`
-        }]
+        messages: [{ role: "user", content: prompt }]
       })
     });
     if (!response.ok) {
@@ -31,17 +35,10 @@ async function lookupBarcode(code) {
       throw new Error(`API error ${response.status}: ${err}`);
     }
     const data = await response.json();
-    console.log("Full response:", JSON.stringify(data).slice(0, 500));
-    // Extract all text blocks from response (web search returns text after searching)
-    const text = (data.content || [])
-      .filter(b => b.type === "text")
-      .map(b => b.text)
-      .join("");
-    console.log("Text content:", text);
+    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
     const jsonMatch = text.match(/\{[^}]+\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
-      console.log("Parsed:", parsed);
       if (parsed.brand || parsed.model) return { ...parsed, barcode: code };
     }
   } catch (e) {
@@ -101,6 +98,7 @@ export default function SneakerCatalog() {
   const [scanStatus, setScanStatus] = useState("");
   const [scanFound, setScanFound] = useState(null);
   const [manualCode, setManualCode] = useState("");
+  const [styleCode, setStyleCode] = useState("");
   const [lookingUp, setLookingUp] = useState(false);
   const [camError, setCamError] = useState("");
   const [dragOver, setDragOver] = useState(false);
@@ -210,9 +208,9 @@ export default function SneakerCatalog() {
     }
   };
 
-  const doLookup = async (code) => {
+  const doLookup = async (code, styleCode = "") => {
     setLookingUp(true); setScanStatus(`Looking up barcode ${code}…`);
-    const result = await lookupBarcode(code);
+    const result = await lookupBarcode(code, styleCode);
     setLookingUp(false);
     if (result && (result.brand || result.model)) {
       setScanFound(result);
@@ -227,7 +225,7 @@ export default function SneakerCatalog() {
     setAddMode("form");
   };
 
-  const handleManualLookup = () => { if (manualCode.trim()) doLookup(manualCode.trim()); };
+  const handleManualLookup = () => { if (manualCode.trim()) doLookup(manualCode.trim(), styleCode.trim()); };
 
   const handlePhoto = (file) => {
     if (!file) return;
@@ -248,7 +246,7 @@ export default function SneakerCatalog() {
   const addSneaker = () => {
     if (!form.brand || !form.model) return;
     setSneakers(prev => [{ ...form, id: Date.now() }, ...prev]);
-    setForm(EMPTY_FORM); setScanFound(null); setManualCode("");
+    setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setStyleCode("");
     setView("catalog"); setAddMode("scan"); setScanStatus("");
   };
 
@@ -419,13 +417,21 @@ export default function SneakerCatalog() {
               )}
 
               {scanMode === "manual" && (
-                <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-                  <input className="inp" placeholder="Enter UPC / barcode number…" value={manualCode}
-                    onChange={e => setManualCode(e.target.value)}
-                    onKeyDown={e => e.key === "Enter" && handleManualLookup()} />
-                  <button className="btn btn-primary" onClick={handleManualLookup} disabled={!manualCode.trim() || lookingUp} style={{ whiteSpace: "nowrap" }}>
-                    {lookingUp ? "…" : "Look up"}
-                  </button>
+                <div style={{ display: "grid", gap: 8, marginBottom: 16 }}>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input className="inp" placeholder="UPC / barcode number (12-13 digits)…" value={manualCode}
+                      onChange={e => setManualCode(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && handleManualLookup()} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input className="inp" placeholder="Style code from box label (e.g. IO9926 001)…" value={styleCode}
+                      onChange={e => setStyleCode(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && handleManualLookup()} />
+                    <button className="btn btn-primary" onClick={handleManualLookup} disabled={(!manualCode.trim() && !styleCode.trim()) || lookingUp} style={{ whiteSpace: "nowrap" }}>
+                      {lookingUp ? "…" : "Look up"}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#aaa" }}>Style code is on the label (e.g. IO9926 001). Enter either or both for best results.</div>
                 </div>
               )}
 
