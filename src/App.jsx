@@ -94,7 +94,11 @@ export default function SneakerCatalog() {
   const streamRef = useRef(null);
 
   const stopCamera = useCallback(() => {
-    if (scannerRef.current) { try { scannerRef.current.reset(); } catch {} scannerRef.current = null; }
+    if (scannerRef.current) {
+      if (scannerRef.current.rafId) cancelAnimationFrame(scannerRef.current.rafId);
+      else { try { scannerRef.current.reset(); } catch {} }
+      scannerRef.current = null;
+    }
     if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
   }, []);
 
@@ -103,23 +107,54 @@ export default function SneakerCatalog() {
   const startCamera = async () => {
     setCamError(""); setScanStatus("Starting camera…"); setScanMode("camera");
     try {
-      const zx = await loadZXing();
-      const hints = new Map();
-      hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
-        zx.BarcodeFormat.EAN_13, zx.BarcodeFormat.EAN_8,
-        zx.BarcodeFormat.UPC_A, zx.BarcodeFormat.UPC_E, zx.BarcodeFormat.CODE_128
-      ]);
-      const reader = new zx.BrowserMultiFormatReader(hints);
-      scannerRef.current = reader;
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
       setScanStatus("Point camera at the barcode on the box…");
-      reader.decodeFromStream(stream, videoRef.current, (result) => {
-        if (result) { stopCamera(); setScanMode("idle"); doLookup(result.getText()); }
-      });
-    } catch {
-      setCamError("Camera not available. Try uploading a photo or enter the barcode manually.");
+
+      // Try native BarcodeDetector first (Android Chrome, newer browsers)
+      if ("BarcodeDetector" in window) {
+        const detector = new window.BarcodeDetector({
+          formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "qr_code"]
+        });
+        const scan = async () => {
+          if (!streamRef.current) return;
+          try {
+            if (videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+              const barcodes = await detector.detect(videoRef.current);
+              if (barcodes.length > 0) {
+                stopCamera(); setScanMode("idle");
+                doLookup(barcodes[0].rawValue);
+                return;
+              }
+            }
+          } catch {}
+          scannerRef.current = { rafId: requestAnimationFrame(scan) };
+        };
+        scannerRef.current = { rafId: requestAnimationFrame(scan) };
+      } else {
+        // Fallback: ZXing
+        const zx = await loadZXing();
+        const hints = new Map();
+        hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
+          zx.BarcodeFormat.EAN_13, zx.BarcodeFormat.EAN_8,
+          zx.BarcodeFormat.UPC_A, zx.BarcodeFormat.UPC_E, zx.BarcodeFormat.CODE_128
+        ]);
+        const reader = new zx.BrowserMultiFormatReader(hints);
+        scannerRef.current = reader;
+        reader.decodeFromStream(stream, videoRef.current, (result) => {
+          if (result) { stopCamera(); setScanMode("idle"); doLookup(result.getText()); }
+        });
+      }
+    } catch (e) {
+      const msg = e.name === "NotAllowedError"
+        ? "Camera permission denied. Please allow camera access in your browser settings and try again."
+        : e.name === "NotFoundError"
+        ? "No camera found on this device."
+        : "Camera unavailable. Try uploading a photo or enter the barcode manually.";
+      setCamError(msg);
       setScanMode("idle"); setScanStatus("");
     }
   };
@@ -127,6 +162,23 @@ export default function SneakerCatalog() {
   const decodeImage = async (file) => {
     setScanStatus("Reading barcode from image…"); setScanMode("upload");
     try {
+      // Try native BarcodeDetector first
+      if ("BarcodeDetector" in window) {
+        const detector = new window.BarcodeDetector({
+          formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "qr_code"]
+        });
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+        const barcodes = await detector.detect(img);
+        URL.revokeObjectURL(url);
+        if (barcodes.length > 0) {
+          setScanMode("idle"); setScanStatus("");
+          doLookup(barcodes[0].rawValue);
+          return;
+        }
+      }
+      // Fallback: ZXing
       const zx = await loadZXing();
       const reader = new zx.BrowserMultiFormatReader();
       const url = URL.createObjectURL(file);
@@ -136,7 +188,7 @@ export default function SneakerCatalog() {
       doLookup(result.getText());
     } catch {
       setScanMode("idle");
-      setScanStatus("⚠️ Couldn't read barcode from image. Try the manual entry option below.");
+      setScanStatus("⚠️ Couldn't read barcode. Try entering the number manually.");
       setTimeout(() => setScanStatus(""), 4000);
     }
   };
