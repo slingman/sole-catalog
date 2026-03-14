@@ -8,32 +8,29 @@ const EMPTY_FORM = {
 
 async function lookupBarcode(code) {
   try {
-    const r = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${code}`);
-    const d = await r.json();
-    if (d.items && d.items.length > 0) {
-      const item = d.items[0];
-      return parseSneakerProduct(item.brand || "", item.title || item.description || "", code);
-    }
-  } catch {}
-  try {
-    const r = await fetch(`https://world.openfoodfacts.org/api/v0/product/${code}.json`);
-    const d = await r.json();
-    if (d.status === 1 && d.product) {
-      const p = d.product;
-      return parseSneakerProduct(p.brands || "", p.product_name || "", code);
-    }
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [{
+          role: "user",
+          content: `Look up this sneaker UPC barcode: ${code}. Search the web to identify the exact sneaker. Return ONLY a raw JSON object with these fields: brand, model, colorway, size. No markdown, no explanation, just JSON. Example: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":""}. If not found, return {"brand":"","model":"","colorway":"","size":""}.`
+        }]
+      })
+    });
+    const data = await response.json();
+    const text = data.content
+      .filter(b => b.type === "text")
+      .map(b => b.text)
+      .join("");
+    const clean = text.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+    if (parsed.brand || parsed.model) return { ...parsed, barcode: code };
   } catch {}
   return null;
-}
-
-function parseSneakerProduct(brand, title, barcode) {
-  const sizeMatch = title.match(/size\s*([\d.]+)/i);
-  const size = sizeMatch ? sizeMatch[1] : "";
-  const cleanBrand = brand.split(",")[0].trim();
-  const colorMatch = title.match(/\(([^)]+)\)/);
-  const colorway = colorMatch ? colorMatch[1].trim() : "";
-  const model = title.replace(cleanBrand, "").replace(`(${colorway})`, "").replace(/\s+/g, " ").trim();
-  return { brand: cleanBrand, model: model || title, colorway, size, barcode };
 }
 
 function parseCsv(text) {
