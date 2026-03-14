@@ -21,6 +21,8 @@ jobs:
           node-version: 20
 
       - name: Install & Build
+        env:
+          VITE_ANTHROPIC_API_KEY: ${{ secrets.VITE_ANTHROPIC_API_KEY }}
         run: |
           npm install
           npm run build
