@@ -12,12 +12,11 @@ async function lookupBarcode(code) {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 500,
         messages: [{
           role: "user",
-          content: `Look up this sneaker UPC barcode: ${code}. Search the web to identify the exact sneaker. Return ONLY a raw JSON object with these fields: brand, model, colorway, size. No markdown, no explanation, just JSON. Example: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":""}. If not found, return {"brand":"","model":"","colorway":"","size":""}.`
+          content: `You are a sneaker expert. Given this UPC barcode number: ${code}, identify the sneaker. Use your training knowledge to return ONLY a raw JSON object with: brand, model, colorway, size. No markdown, no explanation, just JSON. Example: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":""}. If unknown, return {"brand":"","model":"","colorway":"","size":""}.`
         }]
       })
     });
