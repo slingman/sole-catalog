@@ -20,8 +20,10 @@ async function lookupBarcode(code) {
         }]
       })
     });
-    if (!response.ok) throw new Error(`API error ${response.status}`);
-    const data = await response.json();
+    const responseText = await response.text();
+    console.log("API response status:", response.status, "body:", responseText.slice(0, 300));
+    if (!response.ok) throw new Error(`API error ${response.status}: ${responseText}`);
+    const data = JSON.parse(responseText);
     const text = (data.content || [])
       .filter(b => b.type === "text")
       .map(b => b.text)
