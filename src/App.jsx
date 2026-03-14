@@ -12,7 +12,7 @@ async function lookupBarcode(code) {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         max_tokens: 1000,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         messages: [{
@@ -21,15 +21,19 @@ async function lookupBarcode(code) {
         }]
       })
     });
+    if (!response.ok) throw new Error(`API error ${response.status}`);
     const data = await response.json();
-    const text = data.content
+    const text = (data.content || [])
       .filter(b => b.type === "text")
       .map(b => b.text)
       .join("");
-    const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON in response");
+    const parsed = JSON.parse(jsonMatch[0]);
     if (parsed.brand || parsed.model) return { ...parsed, barcode: code };
-  } catch {}
+  } catch (e) {
+    console.error("Lookup error:", e);
+  }
   return null;
 }
 
