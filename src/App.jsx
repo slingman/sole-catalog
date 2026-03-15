@@ -1,52 +1,96 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useCallback } from "react";
 
 const CONDITIONS = ["Deadstock", "Excellent", "Good", "Fair", "Worn"];
 const EMPTY_FORM = {
   brand: "", model: "", colorway: "", size: "",
-  purchasePrice: "", currentValue: "", condition: "Excellent", photo: null, photoUrl: "", barcode: ""
+  purchasePrice: "", currentValue: "", condition: "Excellent",
+  photo: null, photoUrl: "", barcode: "", styleId: ""
 };
 
-async function lookupBarcode(code, styleCode = "") {
-  try {
-    const searchTerm = styleCode
-      ? `Nike style code ${styleCode} OR UPC ${code} sneaker`
-      : `UPC barcode ${code} sneaker shoe`;
-    const prompt = styleCode
-      ? `Search the web for sneaker with style code "${styleCode}" (UPC: ${code}). Identify the exact sneaker. Respond with ONLY a JSON object: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":""}. No markdown, just JSON.`
-      : `Search the web for sneaker UPC barcode ${code}. Identify the exact sneaker. Respond with ONLY a JSON object: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":""}. No markdown, just JSON.`;
+// ── Read label image with Claude Vision ───────────────────────────────────────
+async function readLabelImage(file, apiKey) {
+  const base64 = await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+  const mediaType = file.type || "image/jpeg";
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1024,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`API error ${response.status}: ${err}`);
-    }
-    const data = await response.json();
-    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-    const jsonMatch = text.match(/\{[^}]+\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.brand || parsed.model) return { ...parsed, barcode: code };
-    }
-  } catch (e) {
-    console.error("Lookup error:", e);
-  }
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 512,
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: mediaType, data: base64 }
+          },
+          {
+            type: "text",
+            text: `This is a sneaker box label. Extract all information visible and return ONLY a JSON object with these fields:
+- brand: the sneaker brand (e.g. "Nike", "Adidas")
+- model: the model name (e.g. "Air Max 95", "Yeezy Boost 350")
+- colorway: the colorway description (e.g. "Black/Neon Yellow/Cool Grey")
+- size: the US size number (e.g. "9.5", "11")
+- styleId: the style/product code (e.g. "IO9926 001", "FZ5922-001")
+- barcode: the UPC/EAN number if visible (digits only)
+
+Return ONLY the raw JSON, no markdown, no explanation. Example:
+{"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"9.5","styleId":"IO9926 001","barcode":"198488545936"}`
+          }
+        ]
+      }]
+    })
+  });
+
+  if (!response.ok) throw new Error(`API error ${response.status}`);
+  const data = await response.json();
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  const jsonMatch = text.match(/\{[\s\S]*?\}/);
+  if (!jsonMatch) throw new Error("No JSON returned");
+  return JSON.parse(jsonMatch[0]);
+}
+
+// ── Lookup by style code / UPC via web search ─────────────────────────────────
+async function lookupByCode(code, styleCode, apiKey) {
+  const prompt = styleCode
+    ? `Search the web for sneaker with style code "${styleCode}"${code ? ` (UPC: ${code})` : ""}. Identify the exact sneaker. Return ONLY a JSON object: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"${styleCode}"}. No markdown, just JSON.`
+    : `Search the web for sneaker UPC barcode ${code}. Identify the exact sneaker. Return ONLY a JSON object: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":"","styleId":""}. No markdown, just JSON.`;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 512,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      messages: [{ role: "user", content: prompt }]
+    })
+  });
+  if (!response.ok) throw new Error(`API error ${response.status}`);
+  const data = await response.json();
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  const jsonMatch = text.match(/\{[^}]+\}/);
+  if (jsonMatch) return JSON.parse(jsonMatch[0]);
   return null;
 }
 
+// ── CSV parser ────────────────────────────────────────────────────────────────
 function parseCsv(text) {
   const lines = text.trim().split("\n");
   if (lines.length < 2) return [];
@@ -72,162 +116,90 @@ function conditionColor(c) {
   return { Deadstock: "#22c55e", Excellent: "#3b82f6", Good: "#f59e0b", Fair: "#f97316", Worn: "#ef4444" }[c] || "#999";
 }
 
-let ZXingLoaded = false;
-async function loadZXing() {
-  if (ZXingLoaded && window.ZXing) return window.ZXing;
-  return new Promise((res, rej) => {
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.1/umd/index.min.js";
-    s.onload = () => { ZXingLoaded = true; res(window.ZXing); };
-    s.onerror = rej;
-    document.head.appendChild(s);
-  });
-}
+const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
+// ── Main App ──────────────────────────────────────────────────────────────────
 export default function SneakerCatalog() {
   const [sneakers, setSneakers] = useState([]);
   const [view, setView] = useState("catalog");
-  const [addMode, setAddMode] = useState("scan");
+  const [addMode, setAddMode] = useState("scan"); // scan | form
   const [form, setForm] = useState(EMPTY_FORM);
   const [selected, setSelected] = useState(null);
   const [search, setSearch] = useState("");
   const [filterCondition, setFilterCondition] = useState("All");
   const [sortBy, setSortBy] = useState("newest");
   const [csvError, setCsvError] = useState("");
-  const [scanMode, setScanMode] = useState("idle");
   const [scanStatus, setScanStatus] = useState("");
   const [scanFound, setScanFound] = useState(null);
   const [manualCode, setManualCode] = useState("");
-  const [styleCode, setStyleCode] = useState("");
+  const [manualStyle, setManualStyle] = useState("");
   const [lookingUp, setLookingUp] = useState(false);
-  const [camError, setCamError] = useState("");
   const [dragOver, setDragOver] = useState(false);
-  const videoRef = useRef();
+  const [labelPreview, setLabelPreview] = useState(null);
+
+  const labelRef = useRef();
   const photoRef = useRef();
   const csvRef = useRef();
-  const scannerRef = useRef(null);
-  const streamRef = useRef(null);
 
-  const stopCamera = useCallback(() => {
-    if (scannerRef.current) {
-      if (scannerRef.current.rafId) cancelAnimationFrame(scannerRef.current.rafId);
-      else { try { scannerRef.current.reset(); } catch {} }
-      scannerRef.current = null;
-    }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-  }, []);
+  const goBack = () => {
+    setView("catalog"); setAddMode("scan");
+    setScanFound(null); setScanStatus(""); setLabelPreview(null);
+  };
 
-  useEffect(() => () => stopCamera(), [stopCamera]);
-
-  const startCamera = async () => {
-    setCamError(""); setScanStatus("Starting camera…"); setScanMode("camera");
+  // ── Scan label photo with Claude Vision ──
+  const handleLabelScan = async (file) => {
+    if (!file) return;
+    setLabelPreview(URL.createObjectURL(file));
+    setScanStatus("Reading label…"); setLookingUp(true);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
-      });
-      streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
-      setScanStatus("Point camera at the barcode on the box…");
-
-      // Try native BarcodeDetector first (Android Chrome, newer browsers)
-      if ("BarcodeDetector" in window) {
-        const detector = new window.BarcodeDetector({
-          formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "qr_code"]
-        });
-        const scan = async () => {
-          if (!streamRef.current) return;
-          try {
-            if (videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
-              const barcodes = await detector.detect(videoRef.current);
-              if (barcodes.length > 0) {
-                stopCamera(); setScanMode("idle");
-                doLookup(barcodes[0].rawValue);
-                return;
-              }
-            }
-          } catch {}
-          scannerRef.current = { rafId: requestAnimationFrame(scan) };
-        };
-        scannerRef.current = { rafId: requestAnimationFrame(scan) };
+      const result = await readLabelImage(file, API_KEY);
+      setLookingUp(false);
+      if (result && (result.brand || result.model)) {
+        setScanFound(result);
+        setForm(f => ({ ...f, ...result }));
+        setScanStatus("");
+        setAddMode("form");
       } else {
-        // Fallback: ZXing
-        const zx = await loadZXing();
-        const hints = new Map();
-        hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
-          zx.BarcodeFormat.EAN_13, zx.BarcodeFormat.EAN_8,
-          zx.BarcodeFormat.UPC_A, zx.BarcodeFormat.UPC_E, zx.BarcodeFormat.CODE_128
-        ]);
-        const reader = new zx.BrowserMultiFormatReader(hints);
-        scannerRef.current = reader;
-        reader.decodeFromStream(stream, videoRef.current, (result) => {
-          if (result) { stopCamera(); setScanMode("idle"); doLookup(result.getText()); }
-        });
+        setScanStatus("⚠️ Couldn't read label. Fill in details manually.");
+        setTimeout(() => setScanStatus(""), 4000);
+        setAddMode("form");
       }
     } catch (e) {
-      const msg = e.name === "NotAllowedError"
-        ? "Camera permission denied. Please allow camera access in your browser settings and try again."
-        : e.name === "NotFoundError"
-        ? "No camera found on this device."
-        : "Camera unavailable. Try uploading a photo or enter the barcode manually.";
-      setCamError(msg);
-      setScanMode("idle"); setScanStatus("");
-    }
-  };
-
-  const decodeImage = async (file) => {
-    setScanStatus("Reading barcode from image…"); setScanMode("upload");
-    try {
-      // Try native BarcodeDetector first
-      if ("BarcodeDetector" in window) {
-        const detector = new window.BarcodeDetector({
-          formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "qr_code"]
-        });
-        const img = new Image();
-        const url = URL.createObjectURL(file);
-        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
-        const barcodes = await detector.detect(img);
-        URL.revokeObjectURL(url);
-        if (barcodes.length > 0) {
-          setScanMode("idle"); setScanStatus("");
-          doLookup(barcodes[0].rawValue);
-          return;
-        }
-      }
-      // Fallback: ZXing
-      const zx = await loadZXing();
-      const reader = new zx.BrowserMultiFormatReader();
-      const url = URL.createObjectURL(file);
-      const result = await reader.decodeFromImageUrl(url);
-      URL.revokeObjectURL(url);
-      setScanMode("idle"); setScanStatus("");
-      doLookup(result.getText());
-    } catch {
-      setScanMode("idle");
-      setScanStatus("⚠️ Couldn't read barcode. Try entering the number manually.");
+      setLookingUp(false);
+      setScanStatus("⚠️ Error reading label. Try manual entry.");
       setTimeout(() => setScanStatus(""), 4000);
+      setAddMode("form");
     }
   };
 
-  const doLookup = async (code, styleCode = "") => {
-    setLookingUp(true); setScanStatus(`Looking up barcode ${code}…`);
-    const result = await lookupBarcode(code, styleCode);
-    setLookingUp(false);
-    if (result && (result.brand || result.model)) {
-      setScanFound(result);
-      setForm(f => ({ ...f, ...result }));
-      setScanStatus("");
-    } else {
-      setScanFound({ barcode: code });
-      setForm(f => ({ ...f, barcode: code }));
-      setScanStatus(`⚠️ No product found for barcode ${code}. Fill in details manually.`);
-      setTimeout(() => setScanStatus(""), 5000);
+  // ── Manual code lookup ──
+  const handleManualLookup = async () => {
+    if (!manualCode.trim() && !manualStyle.trim()) return;
+    setScanStatus("Searching…"); setLookingUp(true);
+    try {
+      const result = await lookupByCode(manualCode.trim(), manualStyle.trim(), API_KEY);
+      setLookingUp(false);
+      if (result && (result.brand || result.model)) {
+        setScanFound(result);
+        setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
+        setScanStatus("");
+        setAddMode("form");
+      } else {
+        setScanFound({ barcode: manualCode, styleId: manualStyle });
+        setForm(f => ({ ...f, barcode: manualCode, styleId: manualStyle }));
+        setScanStatus("⚠️ No match found. Fill in details manually.");
+        setTimeout(() => setScanStatus(""), 4000);
+        setAddMode("form");
+      }
+    } catch (e) {
+      setLookingUp(false);
+      setScanStatus("⚠️ Lookup failed. Fill in details manually.");
+      setTimeout(() => setScanStatus(""), 4000);
+      setAddMode("form");
     }
-    setAddMode("form");
   };
 
-  const handleManualLookup = () => { if (manualCode.trim()) doLookup(manualCode.trim(), styleCode.trim()); };
-
-  const handlePhoto = (file) => {
+  const handleSneakerPhoto = (file) => {
     if (!file) return;
     setForm(f => ({ ...f, photo: file, photoUrl: URL.createObjectURL(file) }));
   };
@@ -246,13 +218,12 @@ export default function SneakerCatalog() {
   const addSneaker = () => {
     if (!form.brand || !form.model) return;
     setSneakers(prev => [{ ...form, id: Date.now() }, ...prev]);
-    setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setStyleCode("");
+    setForm(EMPTY_FORM); setScanFound(null);
+    setManualCode(""); setManualStyle(""); setLabelPreview(null);
     setView("catalog"); setAddMode("scan"); setScanStatus("");
   };
 
   const deleteSneaker = (id) => { setSneakers(prev => prev.filter(s => s.id !== id)); setView("catalog"); };
-
-  const goBack = () => { stopCamera(); setView("catalog"); setAddMode("scan"); setScanFound(null); setScanStatus(""); setScanMode("idle"); };
 
   const filtered = sneakers
     .filter(s => filterCondition === "All" || s.condition === filterCondition)
@@ -262,16 +233,8 @@ export default function SneakerCatalog() {
   const totalValue = sneakers.reduce((acc, s) => acc + (parseFloat(s.currentValue) || 0), 0);
   const totalPaid = sneakers.reduce((acc, s) => acc + (parseFloat(s.purchasePrice) || 0), 0);
 
-  const S = {
-    page: { fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", background: "#fafaf8", minHeight: "100vh", color: "#111" },
-    header: { borderBottom: "1px solid #e8e6e1", background: "#fff", position: "sticky", top: 0, zIndex: 100 },
-    headerInner: { maxWidth: 1100, margin: "0 auto", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 60 },
-    wrap: { maxWidth: 1100, margin: "0 auto", padding: "32px 24px" },
-    formWrap: { maxWidth: 560, margin: "0 auto" },
-  };
-
   return (
-    <div style={S.page}>
+    <div style={{ fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", background: "#fafaf8", minHeight: "100vh", color: "#111" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Serif+Display&display=swap');
         *{box-sizing:border-box;margin:0;padding:0} input,select{font-family:inherit}
@@ -288,17 +251,15 @@ export default function SneakerCatalog() {
         .tag{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;color:#fff}
         .scan-tile{border:1.5px solid #e8e6e1;border-radius:14px;padding:20px 14px;text-align:center;cursor:pointer;transition:all .18s;background:#fff;user-select:none}
         .scan-tile:hover{border-color:#111;transform:translateY(-1px)}
-        .scan-tile.on{border-color:#111;background:#111;color:#fff}
         .drop-zone{border:2px dashed #d4d2cc;border-radius:12px;padding:28px 20px;text-align:center;cursor:pointer;transition:all .2s;background:#fafaf8}
         .drop-zone.over{border-color:#111;background:#f0efea} .drop-zone:hover{border-color:#aaa}
         .pulse{animation:pulse 1.4s infinite} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-        video{width:100%;border-radius:12px;display:block;background:#000}
         ::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-thumb{background:#ddd;border-radius:3px}
       `}</style>
 
       {/* Header */}
-      <div style={S.header}>
-        <div style={S.headerInner}>
+      <div style={{ borderBottom: "1px solid #e8e6e1", background: "#fff", position: "sticky", top: 0, zIndex: 100 }}>
+        <div style={{ maxWidth: 1100, margin: "0 auto", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 60 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
             <span style={{ fontFamily: "'DM Serif Display',serif", fontSize: 22 }}>Sole</span>
             <span style={{ fontSize: 12, color: "#999", fontWeight: 500 }}>{sneakers.length} pairs</span>
@@ -310,13 +271,13 @@ export default function SneakerCatalog() {
                 Import CSV
                 <input ref={csvRef} type="file" accept=".csv,.tsv" style={{ display: "none" }} onChange={e => e.target.files[0] && handleCsv(e.target.files[0])} />
               </label>
-              <button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setAddMode("scan"); setScanStatus(""); setScanMode("idle"); setView("add"); }}>+ Add Sneaker</button>
+              <button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle(""); setLabelPreview(null); setAddMode("scan"); setScanStatus(""); setView("add"); }}>+ Add Sneaker</button>
             </>}
           </div>
         </div>
       </div>
 
-      <div style={S.wrap}>
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "32px 24px" }}>
 
         {/* ── CATALOG ── */}
         {view === "catalog" && <>
@@ -344,7 +305,6 @@ export default function SneakerCatalog() {
             </div>
           )}
           {csvError && <div style={{ background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#dc2626", marginBottom: 16 }}>{csvError}</div>}
-
           {filtered.length > 0 ? (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 18 }}>
               {filtered.map(s => (
@@ -372,7 +332,7 @@ export default function SneakerCatalog() {
             <div style={{ textAlign: "center", padding: "80px 20px" }}>
               <div style={{ fontSize: 48, marginBottom: 16 }}>👟</div>
               <div style={{ fontFamily: "'DM Serif Display',serif", fontSize: 24, marginBottom: 8 }}>{sneakers.length > 0 ? "No matches" : "Your collection awaits"}</div>
-              <div style={{ color: "#aaa", fontSize: 14, marginBottom: 24 }}>{sneakers.length > 0 ? "Try a different search or filter" : "Scan a barcode, add manually, or import a CSV"}</div>
+              <div style={{ color: "#aaa", fontSize: 14, marginBottom: 24 }}>{sneakers.length > 0 ? "Try a different search or filter" : "Scan a box label, add manually, or import a CSV"}</div>
               {!sneakers.length && <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
                 <label className="btn btn-ghost" style={{ cursor: "pointer" }}>Import CSV<input type="file" accept=".csv" style={{ display: "none" }} onChange={e => e.target.files[0] && handleCsv(e.target.files[0])} /></label>
                 <button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setAddMode("scan"); setView("add"); }}>+ Add Sneaker</button>
@@ -383,76 +343,85 @@ export default function SneakerCatalog() {
 
         {/* ── ADD ── */}
         {view === "add" && (
-          <div style={S.formWrap}>
+          <div style={{ maxWidth: 560, margin: "0 auto" }}>
             <h1 style={{ fontFamily: "'DM Serif Display',serif", fontSize: 28, marginBottom: 6 }}>Add Sneaker</h1>
 
             {addMode === "scan" && <>
-              <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>Scan the barcode on the sneaker box to auto-fill details.</p>
+              <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>Snap a photo of the box label — Claude will read the brand, model, colorway, size, and style code automatically.</p>
 
-              {/* 3 tiles */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
-                <div className={`scan-tile${scanMode === "camera" ? " on" : ""}`}
-                  onClick={scanMode === "camera" ? () => { stopCamera(); setScanMode("idle"); setScanStatus(""); } : startCamera}>
-                  <div style={{ fontSize: 30, marginBottom: 8 }}>📷</div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{scanMode === "camera" ? "Stop" : "Camera"}</div>
-                  <div style={{ fontSize: 11, opacity: .6, marginTop: 3 }}>Live scan</div>
+              {/* Primary: scan label */}
+              <label style={{ display: "block", marginBottom: 16, cursor: "pointer" }}>
+                <div style={{ background: "#111", color: "#fff", borderRadius: 14, padding: "24px 20px", textAlign: "center", transition: "background .15s" }}
+                  onMouseOver={e => e.currentTarget.style.background="#333"}
+                  onMouseOut={e => e.currentTarget.style.background="#111"}>
+                  {lookingUp
+                    ? <div className="pulse" style={{ fontSize: 14 }}>🔍 Reading label…</div>
+                    : <>
+                        <div style={{ fontSize: 36, marginBottom: 10 }}>🏷️</div>
+                        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Scan Box Label</div>
+                        <div style={{ fontSize: 13, opacity: .7 }}>Take a photo of the label on the side of the box</div>
+                      </>}
                 </div>
-                <label className="scan-tile" style={{ cursor: "pointer" }}>
-                  <div style={{ fontSize: 30, marginBottom: 8 }}>🖼️</div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>Photo</div>
-                  <div style={{ fontSize: 11, color: "#aaa", marginTop: 3 }}>Upload label</div>
-                  <input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={e => e.target.files[0] && decodeImage(e.target.files[0])} />
-                </label>
-                <div className={`scan-tile${scanMode === "manual" ? " on" : ""}`} onClick={() => setScanMode(m => m === "manual" ? "idle" : "manual")}>
-                  <div style={{ fontSize: 30, marginBottom: 8 }}>⌨️</div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>Manual</div>
-                  <div style={{ fontSize: 11, opacity: .6, marginTop: 3 }}>Type code</div>
-                </div>
-              </div>
+                <input ref={labelRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
+                  onChange={e => e.target.files[0] && handleLabelScan(e.target.files[0])} />
+              </label>
 
-              {scanMode === "camera" && (
-                <div style={{ marginBottom: 16 }}>
-                  <video ref={videoRef} autoPlay playsInline muted />
+              {labelPreview && (
+                <div style={{ marginBottom: 16, borderRadius: 10, overflow: "hidden", border: "1px solid #e8e6e1" }}>
+                  <img src={labelPreview} alt="label" style={{ width: "100%", maxHeight: 200, objectFit: "contain", background: "#f5f4f0" }} />
                 </div>
               )}
 
-              {scanMode === "manual" && (
-                <div style={{ display: "grid", gap: 8, marginBottom: 16 }}>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <input className="inp" placeholder="UPC / barcode number (12-13 digits)…" value={manualCode}
+              {scanStatus && (
+                <div style={{ background: "#f5f4f0", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#555", marginBottom: 14 }} className={lookingUp ? "pulse" : ""}>
+                  {scanStatus}
+                </div>
+              )}
+
+              {/* Divider */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0" }}>
+                <div style={{ flex: 1, height: 1, background: "#e8e6e1" }} />
+                <span style={{ fontSize: 12, color: "#aaa" }}>or enter codes manually</span>
+                <div style={{ flex: 1, height: 1, background: "#e8e6e1" }} />
+              </div>
+
+              {/* Manual fallback */}
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <div>
+                    <label className="lbl">UPC / Barcode</label>
+                    <input className="inp" placeholder="198488545936" value={manualCode}
                       onChange={e => setManualCode(e.target.value)}
                       onKeyDown={e => e.key === "Enter" && handleManualLookup()} />
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <input className="inp" placeholder="Style code from box label (e.g. IO9926 001)…" value={styleCode}
-                      onChange={e => setStyleCode(e.target.value)}
+                  <div>
+                    <label className="lbl">Style Code</label>
+                    <input className="inp" placeholder="IO9926 001" value={manualStyle}
+                      onChange={e => setManualStyle(e.target.value)}
                       onKeyDown={e => e.key === "Enter" && handleManualLookup()} />
-                    <button className="btn btn-primary" onClick={handleManualLookup} disabled={(!manualCode.trim() && !styleCode.trim()) || lookingUp} style={{ whiteSpace: "nowrap" }}>
-                      {lookingUp ? "…" : "Look up"}
-                    </button>
                   </div>
-                  <div style={{ fontSize: 11, color: "#aaa" }}>Style code is on the label (e.g. IO9926 001). Enter either or both for best results.</div>
                 </div>
-              )}
+                <button className="btn btn-ghost" onClick={handleManualLookup}
+                  disabled={(!manualCode.trim() && !manualStyle.trim()) || lookingUp}
+                  style={{ width: "100%" }}>
+                  {lookingUp ? "Searching…" : "Look up"}
+                </button>
+              </div>
 
-              {(scanStatus || lookingUp) && (
-                <div style={{ background: "#f5f4f0", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#555", marginBottom: 14 }} className={lookingUp ? "pulse" : ""}>
-                  {lookingUp ? `🔍 ${scanStatus}` : scanStatus}
-                </div>
-              )}
-              {camError && <div style={{ background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#dc2626", marginBottom: 14 }}>{camError}</div>}
-
-              <div style={{ textAlign: "center", marginTop: 10 }}>
-                <button className="btn btn-ghost" onClick={() => setAddMode("form")}>Skip scan — fill in manually</button>
+              <div style={{ textAlign: "center", marginTop: 16 }}>
+                <button className="btn btn-ghost" onClick={() => setAddMode("form")} style={{ fontSize: 12, color: "#aaa", border: "none" }}>
+                  Skip — fill in manually
+                </button>
               </div>
             </>}
 
+            {/* ── Form ── */}
             {addMode === "form" && <>
               {scanFound && (
                 <div style={{ background: scanFound.brand ? "#f0fdf4" : "#fffbeb", border: `1px solid ${scanFound.brand ? "#bbf7d0" : "#fde68a"}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: scanFound.brand ? "#166534" : "#92400e", marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
-                  {scanFound.brand ? `✅ Found: ${scanFound.brand} ${scanFound.model}` : `⚠️ Barcode ${scanFound.barcode} — fill in details manually`}
+                  {scanFound.brand ? `✅ Found: ${scanFound.brand} ${scanFound.model}` : "⚠️ Not found — fill in details manually"}
                   <button className="btn" style={{ marginLeft: "auto", fontSize: 11, padding: "3px 10px", border: "1px solid currentColor", borderRadius: 6 }}
-                    onClick={() => { setScanFound(null); setForm(EMPTY_FORM); setAddMode("scan"); setScanMode("idle"); setScanStatus(""); }}>
+                    onClick={() => { setScanFound(null); setForm(EMPTY_FORM); setAddMode("scan"); setScanStatus(""); setLabelPreview(null); }}>
                     Re-scan
                   </button>
                 </div>
@@ -460,11 +429,14 @@ export default function SneakerCatalog() {
               <div style={{ display: "grid", gap: 16 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                   <div><label className="lbl">Brand *</label><input className="inp" placeholder="Nike, Adidas…" value={form.brand} onChange={e => setForm(f => ({ ...f, brand: e.target.value }))} /></div>
-                  <div><label className="lbl">Model *</label><input className="inp" placeholder="Air Max 1…" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} /></div>
+                  <div><label className="lbl">Model *</label><input className="inp" placeholder="Air Max 95…" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} /></div>
                 </div>
-                <div><label className="lbl">Colorway</label><input className="inp" placeholder="Bred, Triple White…" value={form.colorway} onChange={e => setForm(f => ({ ...f, colorway: e.target.value }))} /></div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
-                  <div><label className="lbl">Size (US)</label><input className="inp" type="number" placeholder="10.5" value={form.size} onChange={e => setForm(f => ({ ...f, size: e.target.value }))} /></div>
+                <div><label className="lbl">Colorway</label><input className="inp" placeholder="Black/Neon Yellow…" value={form.colorway} onChange={e => setForm(f => ({ ...f, colorway: e.target.value }))} /></div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                  <div><label className="lbl">Style ID</label><input className="inp" placeholder="IO9926 001" value={form.styleId} onChange={e => setForm(f => ({ ...f, styleId: e.target.value }))} /></div>
+                  <div><label className="lbl">Size (US)</label><input className="inp" type="number" placeholder="9.5" value={form.size} onChange={e => setForm(f => ({ ...f, size: e.target.value }))} /></div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                   <div><label className="lbl">Paid ($)</label><input className="inp" type="number" placeholder="120" value={form.purchasePrice} onChange={e => setForm(f => ({ ...f, purchasePrice: e.target.value }))} /></div>
                   <div><label className="lbl">Value ($)</label><input className="inp" type="number" placeholder="200" value={form.currentValue} onChange={e => setForm(f => ({ ...f, currentValue: e.target.value }))} /></div>
                 </div>
@@ -484,12 +456,12 @@ export default function SneakerCatalog() {
                   <div className={`drop-zone${dragOver ? " over" : ""}`}
                     onDragOver={e => { e.preventDefault(); setDragOver(true); }}
                     onDragLeave={() => setDragOver(false)}
-                    onDrop={e => { e.preventDefault(); setDragOver(false); handlePhoto(e.dataTransfer.files[0]); }}
+                    onDrop={e => { e.preventDefault(); setDragOver(false); handleSneakerPhoto(e.dataTransfer.files[0]); }}
                     onClick={() => photoRef.current?.click()}>
                     {form.photoUrl
                       ? <img src={form.photoUrl} alt="preview" style={{ height: 100, borderRadius: 8, objectFit: "contain" }} />
                       : <><div style={{ fontSize: 28, marginBottom: 8 }}>📷</div><div style={{ fontSize: 13, color: "#888" }}>Drop photo here or <span style={{ textDecoration: "underline" }}>browse</span></div></>}
-                    <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handlePhoto(e.target.files[0])} />
+                    <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleSneakerPhoto(e.target.files[0])} />
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", paddingTop: 4 }}>
@@ -530,7 +502,8 @@ export default function SneakerCatalog() {
                       </div>
                     ))}
                   </div>
-                  {s.barcode && <div style={{ marginTop: 14, fontSize: 12, color: "#ccc" }}>UPC: {s.barcode}</div>}
+                  {s.styleId && <div style={{ marginTop: 16, fontSize: 12, color: "#aaa" }}>Style: {s.styleId}</div>}
+                  {s.barcode && <div style={{ marginTop: 4, fontSize: 12, color: "#ccc" }}>UPC: {s.barcode}</div>}
                   <div style={{ marginTop: 20 }}>
                     <button className="btn btn-ghost" style={{ color: "#ef4444", borderColor: "#fca5a5" }} onClick={() => deleteSneaker(s.id)}>Remove from Collection</button>
                   </div>
