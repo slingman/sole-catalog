@@ -1,4 +1,10 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
 
 const CONDITIONS = ["Deadstock", "Excellent", "Good", "Fair", "Worn"];
 const EMPTY_FORM = {
@@ -7,7 +13,6 @@ const EMPTY_FORM = {
   photo: null, photoUrl: "", barcode: "", styleId: ""
 };
 
-// ── Read label image with Claude Vision ───────────────────────────────────────
 async function readLabelImage(file, apiKey) {
   const base64 = await new Promise((res, rej) => {
     const r = new FileReader();
@@ -15,8 +20,6 @@ async function readLabelImage(file, apiKey) {
     r.onerror = rej;
     r.readAsDataURL(file);
   });
-  const mediaType = file.type || "image/jpeg";
-
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -31,28 +34,12 @@ async function readLabelImage(file, apiKey) {
       messages: [{
         role: "user",
         content: [
-          {
-            type: "image",
-            source: { type: "base64", media_type: mediaType, data: base64 }
-          },
-          {
-            type: "text",
-            text: `This is a sneaker box label. Extract all information visible and return ONLY a JSON object with these fields:
-- brand: the sneaker brand (e.g. "Nike", "Adidas")
-- model: the model name (e.g. "Air Max 95", "Yeezy Boost 350")
-- colorway: the colorway description (e.g. "Black/Neon Yellow/Cool Grey")
-- size: the US size number (e.g. "9.5", "11")
-- styleId: the style/product code (e.g. "IO9926 001", "FZ5922-001")
-- barcode: the UPC/EAN number if visible (digits only)
-
-Return ONLY the raw JSON, no markdown, no explanation. Example:
-{"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"9.5","styleId":"IO9926 001","barcode":"198488545936"}`
-          }
+          { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
+          { type: "text", text: `This is a sneaker box label. Extract all visible information and return ONLY a JSON object with: brand, model, colorway, size (US), styleId (product/style code), barcode (UPC digits only). No markdown, just JSON. Example: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"9.5","styleId":"IO9926 001","barcode":"198488545936"}` }
         ]
       }]
     })
   });
-
   if (!response.ok) throw new Error(`API error ${response.status}`);
   const data = await response.json();
   const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
@@ -61,23 +48,15 @@ Return ONLY the raw JSON, no markdown, no explanation. Example:
   return JSON.parse(jsonMatch[0]);
 }
 
-// ── Lookup by style code / UPC via web search ─────────────────────────────────
 async function lookupByCode(code, styleCode, apiKey) {
   const prompt = styleCode
-    ? `Search the web for sneaker with style code "${styleCode}"${code ? ` (UPC: ${code})` : ""}. Identify the exact sneaker. Return ONLY a JSON object: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"${styleCode}"}. No markdown, just JSON.`
-    : `Search the web for sneaker UPC barcode ${code}. Identify the exact sneaker. Return ONLY a JSON object: {"brand":"Nike","model":"Air Force 1 Low","colorway":"White/White","size":"","styleId":""}. No markdown, just JSON.`;
-
+    ? `Search the web for sneaker with style code "${styleCode}"${code ? ` (UPC: ${code})` : ""}. Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"${styleCode}"}. No markdown.`
+    : `Search the web for sneaker UPC ${code}. Return ONLY JSON: {"brand":"Nike","model":"Air Force 1","colorway":"White","size":"","styleId":""}. No markdown.`;
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
-    },
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 512,
+      model: "claude-haiku-4-5-20251001", max_tokens: 512,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }]
     })
@@ -86,11 +65,9 @@ async function lookupByCode(code, styleCode, apiKey) {
   const data = await response.json();
   const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
   const jsonMatch = text.match(/\{[^}]+\}/);
-  if (jsonMatch) return JSON.parse(jsonMatch[0]);
-  return null;
+  return jsonMatch ? JSON.parse(jsonMatch[0]) : null;
 }
 
-// ── CSV parser ────────────────────────────────────────────────────────────────
 function parseCsv(text) {
   const lines = text.trim().split("\n");
   if (lines.length < 2) return [];
@@ -103,11 +80,7 @@ function parseCsv(text) {
   return lines.slice(1).map(line => {
     const vals = line.split(",").map(v => v.trim().replace(/^"|"$/g, ""));
     const row = { ...EMPTY_FORM };
-    headers.forEach((h, i) => {
-      for (const [key, aliases] of Object.entries(fieldMap)) {
-        if (aliases.includes(h)) row[key] = vals[i] || "";
-      }
-    });
+    headers.forEach((h, i) => { for (const [key, aliases] of Object.entries(fieldMap)) { if (aliases.includes(h)) row[key] = vals[i] || ""; } });
     return row;
   }).filter(r => r.brand || r.model);
 }
@@ -118,12 +91,18 @@ function conditionColor(c) {
 
 const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
-// ── Main App ──────────────────────────────────────────────────────────────────
 export default function SneakerCatalog() {
+  const [user, setUser] = useState(null);
+  const [authMode, setAuthMode] = useState("login"); // login | signup
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
   const [sneakers, setSneakers] = useState([]);
   const [view, setView] = useState("catalog");
-  const [addMode, setAddMode] = useState("scan"); // scan | form
+  const [addMode, setAddMode] = useState("scan");
   const [form, setForm] = useState(EMPTY_FORM);
+  const [editingId, setEditingId] = useState(null);
   const [selected, setSelected] = useState(null);
   const [search, setSearch] = useState("");
   const [filterCondition, setFilterCondition] = useState("All");
@@ -136,17 +115,47 @@ export default function SneakerCatalog() {
   const [lookingUp, setLookingUp] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [labelPreview, setLabelPreview] = useState(null);
-
+  const [saving, setSaving] = useState(false);
   const labelRef = useRef();
   const photoRef = useRef();
   const csvRef = useRef();
 
-  const goBack = () => {
-    setView("catalog"); setAddMode("scan");
-    setScanFound(null); setScanStatus(""); setLabelPreview(null);
+  // ── Auth ──
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // ── Load sneakers from Supabase ──
+  useEffect(() => {
+    if (!user) { setSneakers([]); return; }
+    supabase.from("sneakers").select("*").order("created_at", { ascending: false })
+      .then(({ data }) => {
+        if (data) setSneakers(data.map(s => ({
+          id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
+          size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
+          condition: s.condition || "Excellent", photoUrl: s.photo_url || "",
+          barcode: s.barcode || "", styleId: s.style_id || ""
+        })));
+      });
+  }, [user]);
+
+  const handleAuth = async () => {
+    setAuthError(""); setAuthLoading(true);
+    const fn = authMode === "login" ? supabase.auth.signInWithPassword : supabase.auth.signUp;
+    const { error } = await fn.call(supabase.auth, { email, password });
+    setAuthLoading(false);
+    if (error) setAuthError(error.message);
   };
 
-  // ── Scan label photo with Claude Vision ──
+  const handleSignOut = async () => { await supabase.auth.signOut(); setSneakers([]); };
+
+  // ── Label scan ──
   const handleLabelScan = async (file) => {
     if (!file) return;
     setLabelPreview(URL.createObjectURL(file));
@@ -155,24 +164,19 @@ export default function SneakerCatalog() {
       const result = await readLabelImage(file, API_KEY);
       setLookingUp(false);
       if (result && (result.brand || result.model)) {
-        setScanFound(result);
-        setForm(f => ({ ...f, ...result }));
-        setScanStatus("");
-        setAddMode("form");
+        setScanFound(result); setForm(f => ({ ...f, ...result }));
+        setScanStatus(""); setAddMode("form");
       } else {
         setScanStatus("⚠️ Couldn't read label. Fill in details manually.");
-        setTimeout(() => setScanStatus(""), 4000);
-        setAddMode("form");
+        setTimeout(() => setScanStatus(""), 4000); setAddMode("form");
       }
-    } catch (e) {
+    } catch {
       setLookingUp(false);
       setScanStatus("⚠️ Error reading label. Try manual entry.");
-      setTimeout(() => setScanStatus(""), 4000);
-      setAddMode("form");
+      setTimeout(() => setScanStatus(""), 4000); setAddMode("form");
     }
   };
 
-  // ── Manual code lookup ──
   const handleManualLookup = async () => {
     if (!manualCode.trim() && !manualStyle.trim()) return;
     setScanStatus("Searching…"); setLookingUp(true);
@@ -180,22 +184,16 @@ export default function SneakerCatalog() {
       const result = await lookupByCode(manualCode.trim(), manualStyle.trim(), API_KEY);
       setLookingUp(false);
       if (result && (result.brand || result.model)) {
-        setScanFound(result);
-        setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
-        setScanStatus("");
-        setAddMode("form");
+        setScanFound(result); setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
+        setScanStatus(""); setAddMode("form");
       } else {
         setScanFound({ barcode: manualCode, styleId: manualStyle });
         setForm(f => ({ ...f, barcode: manualCode, styleId: manualStyle }));
         setScanStatus("⚠️ No match found. Fill in details manually.");
-        setTimeout(() => setScanStatus(""), 4000);
-        setAddMode("form");
+        setTimeout(() => setScanStatus(""), 4000); setAddMode("form");
       }
-    } catch (e) {
-      setLookingUp(false);
-      setScanStatus("⚠️ Lookup failed. Fill in details manually.");
-      setTimeout(() => setScanStatus(""), 4000);
-      setAddMode("form");
+    } catch {
+      setLookingUp(false); setScanStatus("⚠️ Lookup failed."); setTimeout(() => setScanStatus(""), 4000); setAddMode("form");
     }
   };
 
@@ -207,31 +205,105 @@ export default function SneakerCatalog() {
   const handleCsv = (file) => {
     setCsvError("");
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const parsed = parseCsv(e.target.result);
       if (!parsed.length) { setCsvError("Couldn't parse file. Check column headers."); return; }
-      setSneakers(prev => [...parsed.map((s, i) => ({ ...s, id: Date.now() + i })), ...prev]);
+      for (const s of parsed) await saveSneaker(s);
     };
     reader.readAsText(file);
   };
 
-  const addSneaker = () => {
-    if (!form.brand || !form.model) return;
-    setSneakers(prev => [{ ...form, id: Date.now() }, ...prev]);
-    setForm(EMPTY_FORM); setScanFound(null);
-    setManualCode(""); setManualStyle(""); setLabelPreview(null);
-    setView("catalog"); setAddMode("scan"); setScanStatus("");
+  const saveSneaker = async (sneakerData, id = null) => {
+    const row = {
+      user_id: user.id,
+      brand: sneakerData.brand, model: sneakerData.model, colorway: sneakerData.colorway,
+      size: sneakerData.size, purchase_price: sneakerData.purchasePrice,
+      current_value: sneakerData.currentValue, condition: sneakerData.condition,
+      photo_url: sneakerData.photoUrl || "", barcode: sneakerData.barcode, style_id: sneakerData.styleId
+    };
+    if (id) {
+      const { data } = await supabase.from("sneakers").update(row).eq("id", id).select().single();
+      return data;
+    } else {
+      const { data } = await supabase.from("sneakers").insert(row).select().single();
+      return data;
+    }
   };
 
-  const deleteSneaker = (id) => { setSneakers(prev => prev.filter(s => s.id !== id)); setView("catalog"); };
+  const addSneaker = async () => {
+    if (!form.brand || !form.model) return;
+    setSaving(true);
+    if (editingId) {
+      const data = await saveSneaker(form, editingId);
+      if (data) setSneakers(prev => prev.map(s => s.id === editingId ? { ...form, id: editingId, photoUrl: form.photoUrl } : s));
+    } else {
+      const data = await saveSneaker(form);
+      if (data) setSneakers(prev => [{ ...form, id: data.id, photoUrl: form.photoUrl }, ...prev]);
+    }
+    setSaving(false);
+    setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle("");
+    setLabelPreview(null); setView("catalog"); setAddMode("scan"); setScanStatus(""); setEditingId(null);
+  };
+
+  const deleteSneaker = async (id) => {
+    await supabase.from("sneakers").delete().eq("id", id);
+    setSneakers(prev => prev.filter(s => s.id !== id));
+    setView("catalog");
+  };
+
+  const startEdit = (s) => {
+    setForm({ ...s, photo: null });
+    setEditingId(s.id);
+    setScanFound(null); setLabelPreview(null); setScanStatus("");
+    setAddMode("form"); setView("add");
+  };
+
+  const goBack = () => {
+    setView("catalog"); setAddMode("scan"); setScanFound(null);
+    setScanStatus(""); setLabelPreview(null); setEditingId(null); setForm(EMPTY_FORM);
+  };
 
   const filtered = sneakers
     .filter(s => filterCondition === "All" || s.condition === filterCondition)
     .filter(s => { const q = search.toLowerCase(); return !q || s.brand.toLowerCase().includes(q) || s.model.toLowerCase().includes(q) || (s.colorway || "").toLowerCase().includes(q); })
-    .sort((a, b) => sortBy === "newest" ? b.id - a.id : sortBy === "brand" ? a.brand.localeCompare(b.brand) : (parseFloat(b.currentValue) || 0) - (parseFloat(a.currentValue) || 0));
+    .sort((a, b) => sortBy === "newest" ? 0 : sortBy === "brand" ? a.brand.localeCompare(b.brand) : (parseFloat(b.currentValue) || 0) - (parseFloat(a.currentValue) || 0));
 
   const totalValue = sneakers.reduce((acc, s) => acc + (parseFloat(s.currentValue) || 0), 0);
   const totalPaid = sneakers.reduce((acc, s) => acc + (parseFloat(s.purchasePrice) || 0), 0);
+
+  // ── Auth screen ──
+  if (!user) return (
+    <div style={{ fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", minHeight: "100vh", background: "#fafaf8", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&display=swap'); *{box-sizing:border-box;margin:0;padding:0} .inp{width:100%;border:1px solid #e0deda;border-radius:8px;padding:10px 13px;font-size:14px;background:#fafaf8;outline:none;transition:border .15s;font-family:inherit} .inp:focus{border-color:#111;background:#fff} .btn{cursor:pointer;border:none;border-radius:8px;font-family:inherit;font-weight:500;transition:all .15s} .btn-primary{background:#111;color:#fff;padding:10px 22px;font-size:14px;width:100%} .btn-primary:hover{background:#333} .btn-primary:disabled{background:#ccc;cursor:default}`}</style>
+      <div style={{ width: "100%", maxWidth: 380, padding: "0 24px" }}>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontFamily: "'DM Serif Display',serif", fontSize: 32, marginBottom: 6 }}>Sole</div>
+          <div style={{ color: "#aaa", fontSize: 14 }}>Your sneaker collection, everywhere</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #e8e6e1", borderRadius: 16, padding: 28 }}>
+          <div style={{ display: "flex", marginBottom: 24, background: "#f5f4f0", borderRadius: 8, padding: 3 }}>
+            {["login", "signup"].map(m => (
+              <button key={m} className="btn" onClick={() => setAuthMode(m)}
+                style={{ flex: 1, padding: "8px", fontSize: 13, fontWeight: 500, borderRadius: 6, background: authMode === m ? "#fff" : "transparent", color: authMode === m ? "#111" : "#888", boxShadow: authMode === m ? "0 1px 4px rgba(0,0,0,.08)" : "none" }}>
+                {m === "login" ? "Sign In" : "Sign Up"}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "grid", gap: 12 }}>
+            <div><label style={{ fontSize: 12, fontWeight: 500, color: "#888", letterSpacing: ".04em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Email</label>
+              <input className="inp" type="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAuth()} /></div>
+            <div><label style={{ fontSize: 12, fontWeight: 500, color: "#888", letterSpacing: ".04em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Password</label>
+              <input className="inp" type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAuth()} /></div>
+            {authError && <div style={{ fontSize: 13, color: "#dc2626", background: "#fef2f2", padding: "8px 12px", borderRadius: 6 }}>{authError}</div>}
+            {authMode === "signup" && <div style={{ fontSize: 12, color: "#aaa" }}>After signing up, check your email to confirm your account.</div>}
+            <button className="btn btn-primary" onClick={handleAuth} disabled={authLoading || !email || !password}>
+              {authLoading ? "…" : authMode === "login" ? "Sign In" : "Create Account"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div style={{ fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", background: "#fafaf8", minHeight: "100vh", color: "#111" }}>
@@ -249,8 +321,6 @@ export default function SneakerCatalog() {
         .inp:focus{border-color:#111;background:#fff}
         .lbl{font-size:12px;font-weight:500;color:#888;letter-spacing:.04em;text-transform:uppercase;display:block;margin-bottom:5px}
         .tag{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;color:#fff}
-        .scan-tile{border:1.5px solid #e8e6e1;border-radius:14px;padding:20px 14px;text-align:center;cursor:pointer;transition:all .18s;background:#fff;user-select:none}
-        .scan-tile:hover{border-color:#111;transform:translateY(-1px)}
         .drop-zone{border:2px dashed #d4d2cc;border-radius:12px;padding:28px 20px;text-align:center;cursor:pointer;transition:all .2s;background:#fafaf8}
         .drop-zone.over{border-color:#111;background:#f0efea} .drop-zone:hover{border-color:#aaa}
         .pulse{animation:pulse 1.4s infinite} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
@@ -264,14 +334,14 @@ export default function SneakerCatalog() {
             <span style={{ fontFamily: "'DM Serif Display',serif", fontSize: 22 }}>Sole</span>
             <span style={{ fontSize: 12, color: "#999", fontWeight: 500 }}>{sneakers.length} pairs</span>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {view !== "catalog" && <button className="btn btn-ghost" onClick={goBack}>← Back</button>}
             {view === "catalog" && <>
               <label className="btn btn-ghost" style={{ cursor: "pointer", display: "flex", alignItems: "center" }}>
-                Import CSV
-                <input ref={csvRef} type="file" accept=".csv,.tsv" style={{ display: "none" }} onChange={e => e.target.files[0] && handleCsv(e.target.files[0])} />
+                Import CSV <input ref={csvRef} type="file" accept=".csv,.tsv" style={{ display: "none" }} onChange={e => e.target.files[0] && handleCsv(e.target.files[0])} />
               </label>
-              <button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle(""); setLabelPreview(null); setAddMode("scan"); setScanStatus(""); setView("add"); }}>+ Add Sneaker</button>
+              <button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle(""); setLabelPreview(null); setAddMode("scan"); setScanStatus(""); setEditingId(null); setView("add"); }}>+ Add Sneaker</button>
+              <button className="btn btn-ghost" onClick={handleSignOut} style={{ fontSize: 12, color: "#aaa" }}>Sign out</button>
             </>}
           </div>
         </div>
@@ -341,89 +411,43 @@ export default function SneakerCatalog() {
           )}
         </>}
 
-        {/* ── ADD ── */}
+        {/* ── ADD / EDIT ── */}
         {view === "add" && (
           <div style={{ maxWidth: 560, margin: "0 auto" }}>
-            <h1 style={{ fontFamily: "'DM Serif Display',serif", fontSize: 28, marginBottom: 6 }}>Add Sneaker</h1>
+            <h1 style={{ fontFamily: "'DM Serif Display',serif", fontSize: 28, marginBottom: 6 }}>{editingId ? "Edit Sneaker" : "Add Sneaker"}</h1>
 
-            {addMode === "scan" && <>
+            {addMode === "scan" && !editingId && <>
               <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>Snap a photo of the box label — Claude will read the brand, model, colorway, size, and style code automatically.</p>
-
-              {/* Primary: scan label */}
               <label style={{ display: "block", marginBottom: 16, cursor: "pointer" }}>
-                <div style={{ background: "#111", color: "#fff", borderRadius: 14, padding: "24px 20px", textAlign: "center", transition: "background .15s" }}
-                  onMouseOver={e => e.currentTarget.style.background="#333"}
-                  onMouseOut={e => e.currentTarget.style.background="#111"}>
+                <div style={{ background: "#111", color: "#fff", borderRadius: 14, padding: "24px 20px", textAlign: "center" }}>
                   {lookingUp
                     ? <div className="pulse" style={{ fontSize: 14 }}>🔍 Reading label…</div>
-                    : <>
-                        <div style={{ fontSize: 36, marginBottom: 10 }}>🏷️</div>
-                        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Scan Box Label</div>
-                        <div style={{ fontSize: 13, opacity: .7 }}>Take a photo of the label on the side of the box</div>
-                      </>}
+                    : <><div style={{ fontSize: 36, marginBottom: 10 }}>🏷️</div><div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Scan Box Label</div><div style={{ fontSize: 13, opacity: .7 }}>Take a photo of the label on the side of the box</div></>}
                 </div>
-                <input ref={labelRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
-                  onChange={e => e.target.files[0] && handleLabelScan(e.target.files[0])} />
+                <input ref={labelRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={e => e.target.files[0] && handleLabelScan(e.target.files[0])} />
               </label>
-
-              {labelPreview && (
-                <div style={{ marginBottom: 16, borderRadius: 10, overflow: "hidden", border: "1px solid #e8e6e1" }}>
-                  <img src={labelPreview} alt="label" style={{ width: "100%", maxHeight: 200, objectFit: "contain", background: "#f5f4f0" }} />
-                </div>
-              )}
-
-              {scanStatus && (
-                <div style={{ background: "#f5f4f0", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#555", marginBottom: 14 }} className={lookingUp ? "pulse" : ""}>
-                  {scanStatus}
-                </div>
-              )}
-
-              {/* Divider */}
+              {labelPreview && <div style={{ marginBottom: 16, borderRadius: 10, overflow: "hidden", border: "1px solid #e8e6e1" }}><img src={labelPreview} alt="label" style={{ width: "100%", maxHeight: 200, objectFit: "contain", background: "#f5f4f0" }} /></div>}
+              {scanStatus && <div style={{ background: "#f5f4f0", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#555", marginBottom: 14 }} className={lookingUp ? "pulse" : ""}>{scanStatus}</div>}
               <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0" }}>
-                <div style={{ flex: 1, height: 1, background: "#e8e6e1" }} />
-                <span style={{ fontSize: 12, color: "#aaa" }}>or enter codes manually</span>
-                <div style={{ flex: 1, height: 1, background: "#e8e6e1" }} />
+                <div style={{ flex: 1, height: 1, background: "#e8e6e1" }} /><span style={{ fontSize: 12, color: "#aaa" }}>or enter codes manually</span><div style={{ flex: 1, height: 1, background: "#e8e6e1" }} />
               </div>
-
-              {/* Manual fallback */}
               <div style={{ display: "grid", gap: 10 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <div>
-                    <label className="lbl">UPC / Barcode</label>
-                    <input className="inp" placeholder="198488545936" value={manualCode}
-                      onChange={e => setManualCode(e.target.value)}
-                      onKeyDown={e => e.key === "Enter" && handleManualLookup()} />
-                  </div>
-                  <div>
-                    <label className="lbl">Style Code</label>
-                    <input className="inp" placeholder="IO9926 001" value={manualStyle}
-                      onChange={e => setManualStyle(e.target.value)}
-                      onKeyDown={e => e.key === "Enter" && handleManualLookup()} />
-                  </div>
+                  <div><label className="lbl">UPC / Barcode</label><input className="inp" placeholder="198488545936" value={manualCode} onChange={e => setManualCode(e.target.value)} onKeyDown={e => e.key === "Enter" && handleManualLookup()} /></div>
+                  <div><label className="lbl">Style Code</label><input className="inp" placeholder="IO9926 001" value={manualStyle} onChange={e => setManualStyle(e.target.value)} onKeyDown={e => e.key === "Enter" && handleManualLookup()} /></div>
                 </div>
-                <button className="btn btn-ghost" onClick={handleManualLookup}
-                  disabled={(!manualCode.trim() && !manualStyle.trim()) || lookingUp}
-                  style={{ width: "100%" }}>
-                  {lookingUp ? "Searching…" : "Look up"}
-                </button>
+                <button className="btn btn-ghost" onClick={handleManualLookup} disabled={(!manualCode.trim() && !manualStyle.trim()) || lookingUp} style={{ width: "100%" }}>{lookingUp ? "Searching…" : "Look up"}</button>
               </div>
-
               <div style={{ textAlign: "center", marginTop: 16 }}>
-                <button className="btn btn-ghost" onClick={() => setAddMode("form")} style={{ fontSize: 12, color: "#aaa", border: "none" }}>
-                  Skip — fill in manually
-                </button>
+                <button className="btn btn-ghost" onClick={() => setAddMode("form")} style={{ fontSize: 12, color: "#aaa", border: "none" }}>Skip — fill in manually</button>
               </div>
             </>}
 
-            {/* ── Form ── */}
-            {addMode === "form" && <>
-              {scanFound && (
+            {(addMode === "form" || editingId) && <>
+              {scanFound && !editingId && (
                 <div style={{ background: scanFound.brand ? "#f0fdf4" : "#fffbeb", border: `1px solid ${scanFound.brand ? "#bbf7d0" : "#fde68a"}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: scanFound.brand ? "#166534" : "#92400e", marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
                   {scanFound.brand ? `✅ Found: ${scanFound.brand} ${scanFound.model}` : "⚠️ Not found — fill in details manually"}
-                  <button className="btn" style={{ marginLeft: "auto", fontSize: 11, padding: "3px 10px", border: "1px solid currentColor", borderRadius: 6 }}
-                    onClick={() => { setScanFound(null); setForm(EMPTY_FORM); setAddMode("scan"); setScanStatus(""); setLabelPreview(null); }}>
-                    Re-scan
-                  </button>
+                  <button className="btn" style={{ marginLeft: "auto", fontSize: 11, padding: "3px 10px", border: "1px solid currentColor", borderRadius: 6 }} onClick={() => { setScanFound(null); setForm(EMPTY_FORM); setAddMode("scan"); setScanStatus(""); setLabelPreview(null); }}>Re-scan</button>
                 </div>
               )}
               <div style={{ display: "grid", gap: 16 }}>
@@ -458,15 +482,16 @@ export default function SneakerCatalog() {
                     onDragLeave={() => setDragOver(false)}
                     onDrop={e => { e.preventDefault(); setDragOver(false); handleSneakerPhoto(e.dataTransfer.files[0]); }}
                     onClick={() => photoRef.current?.click()}>
-                    {form.photoUrl
-                      ? <img src={form.photoUrl} alt="preview" style={{ height: 100, borderRadius: 8, objectFit: "contain" }} />
+                    {form.photoUrl ? <img src={form.photoUrl} alt="preview" style={{ height: 100, borderRadius: 8, objectFit: "contain" }} />
                       : <><div style={{ fontSize: 28, marginBottom: 8 }}>📷</div><div style={{ fontSize: 13, color: "#888" }}>Drop photo here or <span style={{ textDecoration: "underline" }}>browse</span></div></>}
                     <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleSneakerPhoto(e.target.files[0])} />
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", paddingTop: 4 }}>
                   <button className="btn btn-ghost" onClick={goBack}>Cancel</button>
-                  <button className="btn btn-primary" onClick={addSneaker} disabled={!form.brand || !form.model}>Add to Collection</button>
+                  <button className="btn btn-primary" onClick={addSneaker} disabled={!form.brand || !form.model || saving}>
+                    {saving ? "Saving…" : editingId ? "Save Changes" : "Add to Collection"}
+                  </button>
                 </div>
               </div>
             </>}
@@ -504,8 +529,9 @@ export default function SneakerCatalog() {
                   </div>
                   {s.styleId && <div style={{ marginTop: 16, fontSize: 12, color: "#aaa" }}>Style: {s.styleId}</div>}
                   {s.barcode && <div style={{ marginTop: 4, fontSize: 12, color: "#ccc" }}>UPC: {s.barcode}</div>}
-                  <div style={{ marginTop: 20 }}>
-                    <button className="btn btn-ghost" style={{ color: "#ef4444", borderColor: "#fca5a5" }} onClick={() => deleteSneaker(s.id)}>Remove from Collection</button>
+                  <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
+                    <button className="btn btn-ghost" onClick={() => startEdit(s)}>Edit</button>
+                    <button className="btn btn-ghost" style={{ color: "#ef4444", borderColor: "#fca5a5" }} onClick={() => deleteSneaker(s.id)}>Remove</button>
                   </div>
                 </div>
               </div>
