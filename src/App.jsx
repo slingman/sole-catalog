@@ -21,6 +21,33 @@ function saveCollectionCode(code) {
   localStorage.setItem("sole-collection-code", code.trim().toLowerCase());
 }
 
+// Compress image to max 800px and upload to Supabase Storage
+async function compressAndUpload(file, path) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = async () => {
+      const MAX = 800;
+      const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(async (blob) => {
+        const { data, error } = await supabase.storage
+          .from("sneaker-photos")
+          .upload(path, blob, { contentType: "image/jpeg", upsert: true });
+        if (error) { resolve(""); return; }
+        const { data: { publicUrl } } = supabase.storage.from("sneaker-photos").getPublicUrl(path);
+        resolve(publicUrl);
+      }, "image/jpeg", 0.8);
+    };
+    img.onerror = () => resolve("");
+    img.src = url;
+  });
+}
+
 async function readLabelImage(file, apiKey) {
   const base64 = await new Promise((res, rej) => {
     const r = new FileReader();
@@ -78,9 +105,9 @@ async function lookupByCode(code, styleCode, apiKey) {
 
 async function lookupRetailAndYear(brand, model, styleId, apiKey) {
   const prompt = `Search the web for the ${brand} ${model}${styleId ? ` style code ${styleId}` : ""}. Find:
-1. The original retail price (MSRP)
+1. The original retail price (MSRP) in USD
 2. The release year
-3. A direct URL to an official product image (from nike.com, adidas.com, stockx.com, goat.co, or similar — must end in .jpg, .jpeg, .png, or .webp)
+3. A direct image URL from images.stockx.com, image.goat.com, or static.nike.com CDN — these allow hotlinking. The URL must end in .jpg, .jpeg, .png, or .webp. Do not use footdistrict, footlocker, or other retailer URLs as they block hotlinking.
 
 Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","webPhotoUrl":"https://..."}. No markdown, just JSON. Leave empty string if not found.`;
   try {
@@ -192,14 +219,25 @@ export default function SneakerCatalog() {
     try {
       const result = await readLabelImage(file, API_KEY);
       if (result && (result.brand || result.model)) {
-        const labelUrl = URL.createObjectURL(file);
+        // Show preview immediately with blob URL
+        const labelBlobUrl = URL.createObjectURL(file);
         setScanFound(result);
-        setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelUrl }));
+        setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelBlobUrl }));
         setAddMode("form");
-        // Look up retail price + release year in background
-        setScanStatus("Looking up retail price & release year…");
+        // Upload label photo to Supabase Storage
+        setScanStatus("Uploading label photo…");
+        const labelPath = `labels/${Date.now()}-label.jpg`;
+        const labelStorageUrl = await compressAndUpload(file, labelPath);
+        // Look up retail price, release year, web photo
+        setScanStatus("Looking up retail price, year & web photo…");
         const { retailPrice, releaseYear, webPhotoUrl } = await lookupRetailAndYear(result.brand, result.model, result.styleId, API_KEY);
-        setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelUrl, retailPrice: retailPrice || "", releaseYear: releaseYear || "", webPhotoUrl: webPhotoUrl || "" }));
+        setForm(f => ({ ...f, ...result,
+          labelPhoto: file,
+          labelPhotoUrl: labelStorageUrl || labelBlobUrl,
+          retailPrice: retailPrice || "",
+          releaseYear: releaseYear || "",
+          webPhotoUrl: webPhotoUrl || ""
+        }));
         setScanStatus("");
       } else {
         setScanStatus("⚠️ Couldn't read label. Fill in details manually.");
@@ -273,11 +311,23 @@ export default function SneakerCatalog() {
   const addSneaker = async () => {
     if (!form.brand || !form.model) return;
     setSaving(true);
+    // Upload personal photo if it's a new file (blob URL)
+    let photoUrl = form.photoUrl;
+    if (form.photo && form.photoUrl.startsWith("blob:")) {
+      const path = `sneakers/${Date.now()}-photo.jpg`;
+      photoUrl = await compressAndUpload(form.photo, path) || form.photoUrl;
+    }
+    // Upload label photo if it's still a blob URL
+    let labelPhotoUrl = form.labelPhotoUrl;
+    if (form.labelPhoto && form.labelPhotoUrl.startsWith("blob:")) {
+      const path = `labels/${Date.now()}-label.jpg`;
+      labelPhotoUrl = await compressAndUpload(form.labelPhoto, path) || form.labelPhotoUrl;
+    }
     const row = {
       device_id: collectionCode,
       brand: form.brand, model: form.model, colorway: form.colorway,
       size: form.size, purchase_price: form.purchasePrice, current_value: form.currentValue,
-      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", web_photo_url: form.webPhotoUrl || "", condition: form.condition, photo_url: form.photoUrl || "", label_photo_url: form.labelPhotoUrl || "",
+      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", web_photo_url: form.webPhotoUrl || "", condition: form.condition, photo_url: photoUrl || "", label_photo_url: labelPhotoUrl || "",
       barcode: form.barcode || "", style_id: form.styleId || ""
     };
     if (editingId) {
