@@ -13,14 +13,13 @@ const EMPTY_FORM = {
   photo: null, photoUrl: "", barcode: "", styleId: ""
 };
 
-// Stable device ID stored in localStorage
-function getDeviceId() {
-  let id = localStorage.getItem("sole-device-id");
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem("sole-device-id", id); }
-  return id;
+// Collection code — shared across devices
+function getCollectionCode() {
+  return localStorage.getItem("sole-collection-code") || null;
 }
-
-const DEVICE_ID = getDeviceId();
+function saveCollectionCode(code) {
+  localStorage.setItem("sole-collection-code", code.trim().toLowerCase());
+}
 
 async function readLabelImage(file, apiKey) {
   const base64 = await new Promise((res, rej) => {
@@ -110,6 +109,8 @@ function dbToForm(s) {
 }
 
 export default function SneakerCatalog() {
+  const [collectionCode, setCollectionCode] = useState(getCollectionCode);
+  const [codeInput, setCodeInput] = useState("");
   const [sneakers, setSneakers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("catalog");
@@ -133,16 +134,24 @@ export default function SneakerCatalog() {
   const photoRef = useRef();
   const csvRef = useRef();
 
-  // Load all sneakers for this device
+  // Load sneakers when collection code is set
   useEffect(() => {
+    if (!collectionCode) { setLoading(false); return; }
+    setLoading(true);
     supabase.from("sneakers").select("*")
-      .eq("device_id", DEVICE_ID)
+      .eq("device_id", collectionCode)
       .order("created_at", { ascending: false })
-      .then(({ data, error }) => {
+      .then(({ data }) => {
         if (data) setSneakers(data.map(dbToForm));
         setLoading(false);
       });
-  }, []);
+  }, [collectionCode]);
+
+  const handleSetCode = () => {
+    if (!codeInput.trim()) return;
+    saveCollectionCode(codeInput);
+    setCollectionCode(codeInput.trim().toLowerCase());
+  };
 
   const goBack = () => {
     setView("catalog"); setAddMode("scan"); setScanFound(null);
@@ -202,7 +211,7 @@ export default function SneakerCatalog() {
       const parsed = parseCsv(e.target.result);
       if (!parsed.length) { setCsvError("Couldn't parse file. Check column headers."); return; }
       const rows = parsed.map(s => ({
-        device_id: DEVICE_ID, brand: s.brand, model: s.model, colorway: s.colorway,
+        device_id: collectionCode, brand: s.brand, model: s.model, colorway: s.colorway,
         size: s.size, purchase_price: s.purchasePrice, current_value: s.currentValue,
         condition: s.condition, photo_url: "", barcode: s.barcode || "", style_id: s.styleId || ""
       }));
@@ -216,7 +225,7 @@ export default function SneakerCatalog() {
     if (!form.brand || !form.model) return;
     setSaving(true);
     const row = {
-      device_id: DEVICE_ID,
+      device_id: collectionCode,
       brand: form.brand, model: form.model, colorway: form.colorway,
       size: form.size, purchase_price: form.purchasePrice, current_value: form.currentValue,
       condition: form.condition, photo_url: form.photoUrl || "",
@@ -253,6 +262,30 @@ export default function SneakerCatalog() {
 
   const totalValue = sneakers.reduce((acc, s) => acc + (parseFloat(s.currentValue) || 0), 0);
   const totalPaid = sneakers.reduce((acc, s) => acc + (parseFloat(s.purchasePrice) || 0), 0);
+
+  if (!collectionCode) return (
+    <div style={{ fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", minHeight: "100vh", background: "#fafaf8", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&display=swap'); *{box-sizing:border-box;margin:0;padding:0} input{font-family:inherit} .inp{width:100%;border:1px solid #e0deda;border-radius:8px;padding:10px 13px;font-size:14px;background:#fafaf8;outline:none;transition:border .15s} .inp:focus{border-color:#111;background:#fff}`}</style>
+      <div style={{ width: "100%", maxWidth: 380, padding: "0 24px" }}>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontFamily: "'DM Serif Display',serif", fontSize: 32, marginBottom: 8 }}>Sole</div>
+          <div style={{ color: "#aaa", fontSize: 14 }}>Enter your collection code to sync across devices</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #e8e6e1", borderRadius: 16, padding: 28 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: "#888", letterSpacing: ".04em", textTransform: "uppercase", marginBottom: 8 }}>Collection Code</div>
+          <input className="inp" placeholder="e.g. slingman-kicks" value={codeInput}
+            onChange={e => setCodeInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleSetCode()}
+            style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 12, color: "#aaa", marginBottom: 16 }}>Use the same code on all your devices to share your collection. Pick anything memorable.</div>
+          <button onClick={handleSetCode} disabled={!codeInput.trim()}
+            style={{ width: "100%", background: "#111", color: "#fff", border: "none", borderRadius: 8, padding: "10px 22px", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>
+            Enter Collection
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   if (loading) return (
     <div style={{ fontFamily: "'DM Sans',sans-serif", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#fafaf8" }}>
@@ -295,6 +328,7 @@ export default function SneakerCatalog() {
                 Import CSV <input ref={csvRef} type="file" accept=".csv,.tsv" style={{ display: "none" }} onChange={e => e.target.files[0] && handleCsv(e.target.files[0])} />
               </label>
               <button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle(""); setLabelPreview(null); setAddMode("scan"); setScanStatus(""); setEditingId(null); setView("add"); }}>+ Add Sneaker</button>
+              <button className="btn btn-ghost" onClick={() => { localStorage.removeItem("sole-collection-code"); setCollectionCode(null); setCodeInput(""); setSneakers([]); }} style={{ fontSize: 12, color: "#aaa" }} title="Switch collection">⚙️</button>
             </>}
           </div>
         </div>
