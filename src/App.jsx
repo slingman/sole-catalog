@@ -111,11 +111,11 @@ async function lookupByCode(code, styleCode, apiKey) {
 
 async function lookupRetailAndYear(brand, model, styleId, apiKey) {
   const prompt = `Search the web for the ${brand} ${model}${styleId ? ` style code ${styleId}` : ""}. Find:
-1. The original retail price (MSRP) in USD — just the number
+1. The original retail price (MSRP) in USD — just the number, no $ sign
 2. The release year — just the 4-digit year
-3. Search specifically on stockx.com or goat.com for this sneaker and find a direct CDN image URL. StockX images are at cdn.stockx.com or images.stockx.com. GOAT images are at image.goat.com. The URL must end in .jpg, .jpeg, .png, or .webp and start with https://. Only return URLs from these CDNs, nothing else.
+3. The StockX product slug for this sneaker — this is the last part of the StockX URL, e.g. for https://stockx.com/air-jordan-3-retro-denim the slug is "air-jordan-3-retro-denim"
 
-Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","webPhotoUrl":"https://cdn.stockx.com/..."}. No markdown, just JSON. Leave empty string if not found.`;
+Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","stockxSlug":"air-jordan-3-retro-denim"}. No markdown, just JSON. Leave empty string if not found.`;
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -132,8 +132,12 @@ Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","webPhotoUr
     const match = text.match(/\{[\s\S]*?\}/);
     if (match) {
       const parsed = JSON.parse(match[0]);
+      // Build StockX image URL from slug
+      if (parsed.stockxSlug) {
+        parsed.webPhotoUrl = `https://images.stockx.com/images/${parsed.stockxSlug}.jpg?fit=fill&bg=FFFFFF&w=500&h=333&auto=format,compress&trim=color&q=90`;
+      }
       console.log("Lookup result:", parsed);
-      return parsed;
+      return { retailPrice: parsed.retailPrice || "", releaseYear: parsed.releaseYear || "", webPhotoUrl: parsed.webPhotoUrl || "" };
     }
   } catch (e) { console.error("Lookup error:", e); }
   return { retailPrice: "", releaseYear: "", webPhotoUrl: "" };
