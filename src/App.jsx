@@ -13,6 +13,13 @@ const EMPTY_FORM = {
   photo: null, photoUrl: "", webPhotoUrl: "", labelPhoto: null, labelPhotoUrl: "", barcode: "", styleId: ""
 };
 
+// Proxy image URL to avoid CORS/hotlink issues
+function proxyImg(url) {
+  if (!url) return "";
+  // Use allorigins as a CORS proxy for external images
+  return `https://images.weserv.nl/?url=${encodeURIComponent(url)}&w=500&h=400&fit=cover&output=webp`;
+}
+
 // Collection code — shared across devices
 function getCollectionCode() {
   return localStorage.getItem("sole-collection-code") || null;
@@ -484,7 +491,9 @@ export default function SneakerCatalog() {
               {filtered.map(s => (
                 <div key={s.id} className="card" onClick={() => { setSelected(s); setView("detail"); }}>
                   <div style={{ aspectRatio: "4/3", background: "#f5f4f0", borderRadius: "12px 12px 0 0", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {s.photoUrl ? <img src={s.photoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    {(s.photoUrl || s.webPhotoUrl)
+                      ? <img src={s.photoUrl || proxyImg(s.webPhotoUrl)} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                          onError={e => { e.target.onerror=null; e.target.style.display="none"; e.target.parentNode.innerHTML='<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.2"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>'; }} />
                       : <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1.2"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
                   </div>
                   <div style={{ padding: "14px 16px" }}>
@@ -595,7 +604,7 @@ export default function SneakerCatalog() {
                       <div style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginBottom: 5 }}>🌐 Web</div>
                       <div style={{ background: "#f5f4f0", borderRadius: 8, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", border: "1px solid #e8e6e1" }}>
                         {form.webPhotoUrl
-                          ? <img src={form.webPhotoUrl} alt="web" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
+                          ? <img src={proxyImg(form.webPhotoUrl)} alt="web" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
                           : <div style={{ fontSize: 11, color: "#ccc", textAlign: "center", padding: 8 }}>Auto-filled on scan</div>}
                       </div>
                     </div>
@@ -644,14 +653,14 @@ export default function SneakerCatalog() {
                     {s.photoUrl
                       ? <img src={s.photoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                       : s.webPhotoUrl
-                      ? <img src={s.webPhotoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
+                      ? <img src={proxyImg(s.webPhotoUrl)} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
                       : <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
                   </div>
                   {/* Thumbnails row */}
                   {(s.webPhotoUrl || s.photoUrl || s.labelPhotoUrl) && (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
                       {[
-                        { url: s.webPhotoUrl, label: "🌐 Web" },
+                        { url: proxyImg(s.webPhotoUrl), label: "🌐 Web" },
                         { url: s.photoUrl, label: "📸 Mine" },
                         { url: s.labelPhotoUrl, label: "🏷️ Label" },
                       ].map(({ url, label }) => (
