@@ -111,11 +111,11 @@ async function lookupByCode(code, styleCode, apiKey) {
 
 async function lookupRetailAndYear(brand, model, styleId, apiKey) {
   const prompt = `Search the web for the ${brand} ${model}${styleId ? ` style code ${styleId}` : ""}. Find:
-1. The original retail price (MSRP) in USD
-2. The release year
-3. A direct image URL from images.stockx.com, image.goat.com, or static.nike.com CDN — these allow hotlinking. The URL must end in .jpg, .jpeg, .png, or .webp. Do not use footdistrict, footlocker, or other retailer URLs as they block hotlinking.
+1. The original retail price (MSRP) in USD — just the number
+2. The release year — just the 4-digit year
+3. Search specifically on stockx.com or goat.com for this sneaker and find a direct CDN image URL. StockX images are at cdn.stockx.com or images.stockx.com. GOAT images are at image.goat.com. The URL must end in .jpg, .jpeg, .png, or .webp and start with https://. Only return URLs from these CDNs, nothing else.
 
-Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","webPhotoUrl":"https://..."}. No markdown, just JSON. Leave empty string if not found.`;
+Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","webPhotoUrl":"https://cdn.stockx.com/..."}. No markdown, just JSON. Leave empty string if not found.`;
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
