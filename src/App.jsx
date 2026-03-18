@@ -10,7 +10,7 @@ const CONDITIONS = ["Deadstock", "Excellent", "Good", "Fair", "Worn"];
 const EMPTY_FORM = {
   brand: "", model: "", colorway: "", size: "",
   purchasePrice: "", currentValue: "", retailPrice: "", releaseYear: "", condition: "Excellent",
-  photo: null, photoUrl: "", labelPhoto: null, labelPhotoUrl: "", barcode: "", styleId: ""
+  photo: null, photoUrl: "", webPhotoUrl: "", labelPhoto: null, labelPhotoUrl: "", barcode: "", styleId: ""
 };
 
 // Collection code — shared across devices
@@ -77,24 +77,29 @@ async function lookupByCode(code, styleCode, apiKey) {
 }
 
 async function lookupRetailAndYear(brand, model, styleId, apiKey) {
-  const prompt = `Search the web for the ${brand} ${model}${styleId ? ` style code ${styleId}` : ""}. Find the original retail price (MSRP) and the release year. Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019"}. Just numbers, no $ sign. If not found leave empty string. No markdown, just JSON.`;
+  const prompt = `Search the web for the ${brand} ${model}${styleId ? ` style code ${styleId}` : ""}. Find:
+1. The original retail price (MSRP)
+2. The release year
+3. A direct URL to an official product image (from nike.com, adidas.com, stockx.com, goat.co, or similar — must end in .jpg, .jpeg, .png, or .webp)
+
+Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","webPhotoUrl":"https://..."}. No markdown, just JSON. Leave empty string if not found.`;
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001", max_tokens: 256,
+        model: "claude-haiku-4-5-20251001", max_tokens: 512,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         messages: [{ role: "user", content: prompt }]
       })
     });
-    if (!response.ok) return { retailPrice: "", releaseYear: "" };
+    if (!response.ok) return { retailPrice: "", releaseYear: "", webPhotoUrl: "" };
     const data = await response.json();
     const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-    const match = text.match(/\{[^}]+\}/);
+    const match = text.match(/\{[\s\S]*?\}/);
     if (match) return JSON.parse(match[0]);
   } catch {}
-  return { retailPrice: "", releaseYear: "" };
+  return { retailPrice: "", releaseYear: "", webPhotoUrl: "" };
 }
 
 function parseCsv(text) {
@@ -124,7 +129,7 @@ function dbToForm(s) {
   return {
     id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
     size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
-    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", condition: s.condition || "Excellent", photoUrl: s.photo_url || "", labelPhotoUrl: s.label_photo_url || "",
+    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", webPhotoUrl: s.web_photo_url || "", condition: s.condition || "Excellent", photoUrl: s.photo_url || "", labelPhotoUrl: s.label_photo_url || "",
     barcode: s.barcode || "", styleId: s.style_id || ""
   };
 }
@@ -193,8 +198,8 @@ export default function SneakerCatalog() {
         setAddMode("form");
         // Look up retail price + release year in background
         setScanStatus("Looking up retail price & release year…");
-        const { retailPrice, releaseYear } = await lookupRetailAndYear(result.brand, result.model, result.styleId, API_KEY);
-        setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelUrl, retailPrice: retailPrice || "", releaseYear: releaseYear || "" }));
+        const { retailPrice, releaseYear, webPhotoUrl } = await lookupRetailAndYear(result.brand, result.model, result.styleId, API_KEY);
+        setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelUrl, retailPrice: retailPrice || "", releaseYear: releaseYear || "", webPhotoUrl: webPhotoUrl || "" }));
         setScanStatus("");
       } else {
         setScanStatus("⚠️ Couldn't read label. Fill in details manually.");
@@ -231,12 +236,13 @@ export default function SneakerCatalog() {
   const handleUpdateFromWeb = async () => {
     if (!form.brand && !form.model && !form.styleId) return;
     setScanStatus("Updating from web…"); setLookingUp(true);
-    const { retailPrice, releaseYear } = await lookupRetailAndYear(form.brand, form.model, form.styleId, API_KEY);
+    const { retailPrice, releaseYear, webPhotoUrl } = await lookupRetailAndYear(form.brand, form.model, form.styleId, API_KEY);
     setLookingUp(false);
     setForm(f => ({
       ...f,
       retailPrice: retailPrice || f.retailPrice,
-      releaseYear: releaseYear || f.releaseYear
+      releaseYear: releaseYear || f.releaseYear,
+      webPhotoUrl: webPhotoUrl || f.webPhotoUrl
     }));
     setScanStatus(retailPrice || releaseYear ? "✅ Updated!" : "⚠️ Nothing found.");
     setTimeout(() => setScanStatus(""), 3000);
@@ -271,7 +277,7 @@ export default function SneakerCatalog() {
       device_id: collectionCode,
       brand: form.brand, model: form.model, colorway: form.colorway,
       size: form.size, purchase_price: form.purchasePrice, current_value: form.currentValue,
-      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", condition: form.condition, photo_url: form.photoUrl || "", label_photo_url: form.labelPhotoUrl || "",
+      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", web_photo_url: form.webPhotoUrl || "", condition: form.condition, photo_url: form.photoUrl || "", label_photo_url: form.labelPhotoUrl || "",
       barcode: form.barcode || "", style_id: form.styleId || ""
     };
     if (editingId) {
@@ -512,26 +518,38 @@ export default function SneakerCatalog() {
                     ))}
                   </div>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                  <div>
-                    <label className="lbl">Sneaker Photo</label>
-                    <div className={`drop-zone${dragOver ? " over" : ""}`}
-                      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-                      onDragLeave={() => setDragOver(false)}
-                      onDrop={e => { e.preventDefault(); setDragOver(false); handleSneakerPhoto(e.dataTransfer.files[0]); }}
-                      onClick={() => photoRef.current?.click()}
-                      style={{ padding: "16px 12px" }}>
-                      {form.photoUrl ? <img src={form.photoUrl} alt="sneaker" style={{ height: 80, borderRadius: 6, objectFit: "contain" }} />
-                        : <><div style={{ fontSize: 24, marginBottom: 6 }}>👟</div><div style={{ fontSize: 12, color: "#888" }}>Sneaker photo</div></>}
-                      <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleSneakerPhoto(e.target.files[0])} />
+                <div>
+                  <label className="lbl">Photos</label>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginBottom: 5 }}>🌐 Web</div>
+                      <div style={{ background: "#f5f4f0", borderRadius: 8, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", border: "1px solid #e8e6e1" }}>
+                        {form.webPhotoUrl
+                          ? <img src={form.webPhotoUrl} alt="web" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
+                          : <div style={{ fontSize: 11, color: "#ccc", textAlign: "center", padding: 8 }}>Auto-filled on scan</div>}
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <label className="lbl">Box Label Photo</label>
-                    <div className="drop-zone" onClick={() => labelPhotoRef.current?.click()} style={{ padding: "16px 12px" }}>
-                      {form.labelPhotoUrl ? <img src={form.labelPhotoUrl} alt="label" style={{ height: 80, borderRadius: 6, objectFit: "contain" }} />
-                        : <><div style={{ fontSize: 24, marginBottom: 6 }}>🏷️</div><div style={{ fontSize: 12, color: "#888" }}>Label photo</div></>}
-                      <input ref={labelPhotoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => { if (e.target.files[0]) setForm(f => ({ ...f, labelPhoto: e.target.files[0], labelPhotoUrl: URL.createObjectURL(e.target.files[0]) })); }} />
+                    <div>
+                      <div style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginBottom: 5 }}>📸 My Photo</div>
+                      <div className={`drop-zone${dragOver ? " over" : ""}`}
+                        onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                        onDragLeave={() => setDragOver(false)}
+                        onDrop={e => { e.preventDefault(); setDragOver(false); handleSneakerPhoto(e.dataTransfer.files[0]); }}
+                        onClick={() => photoRef.current?.click()}
+                        style={{ padding: "12px 8px", aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                        {form.photoUrl ? <img src={form.photoUrl} alt="mine" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4 }} />
+                          : <><div style={{ fontSize: 20 }}>📸</div><div style={{ fontSize: 10, color: "#aaa", marginTop: 4 }}>Tap to add</div></>}
+                        <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleSneakerPhoto(e.target.files[0])} />
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginBottom: 5 }}>🏷️ Label</div>
+                      <div className="drop-zone" onClick={() => labelPhotoRef.current?.click()}
+                        style={{ padding: "12px 8px", aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                        {form.labelPhotoUrl ? <img src={form.labelPhotoUrl} alt="label" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4 }} />
+                          : <><div style={{ fontSize: 20 }}>🏷️</div><div style={{ fontSize: 10, color: "#aaa", marginTop: 4 }}>Tap to add</div></>}
+                        <input ref={labelPhotoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => { if (e.target.files[0]) setForm(f => ({ ...f, labelPhoto: e.target.files[0], labelPhotoUrl: URL.createObjectURL(e.target.files[0]) })); }} />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -551,14 +569,29 @@ export default function SneakerCatalog() {
             <div style={{ maxWidth: 700, margin: "0 auto" }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32, alignItems: "start" }}>
                 <div style={{ display: "grid", gap: 10 }}>
+                  {/* Primary photo: my photo > web photo > placeholder */}
                   <div style={{ background: "#f5f4f0", borderRadius: 14, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-                    {s.photoUrl ? <img src={s.photoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    {s.photoUrl
+                      ? <img src={s.photoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      : s.webPhotoUrl
+                      ? <img src={s.webPhotoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
                       : <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
                   </div>
-                  {s.labelPhotoUrl && (
-                    <div style={{ background: "#f5f4f0", borderRadius: 10, overflow: "hidden", position: "relative" }}>
-                      <div style={{ fontSize: 10, fontWeight: 600, color: "#aaa", textTransform: "uppercase", letterSpacing: ".06em", padding: "6px 10px 0" }}>Box Label</div>
-                      <img src={s.labelPhotoUrl} alt="label" style={{ width: "100%", maxHeight: 120, objectFit: "contain", padding: "6px 10px 10px" }} />
+                  {/* Thumbnails row */}
+                  {(s.webPhotoUrl || s.photoUrl || s.labelPhotoUrl) && (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
+                      {[
+                        { url: s.webPhotoUrl, label: "🌐 Web" },
+                        { url: s.photoUrl, label: "📸 Mine" },
+                        { url: s.labelPhotoUrl, label: "🏷️ Label" },
+                      ].map(({ url, label }) => (
+                        <div key={label} style={{ background: "#f5f4f0", borderRadius: 8, overflow: "hidden", aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", border: "1px solid #e8e6e1" }}>
+                          {url
+                            ? <img src={url} alt={label} style={{ width: "100%", height: "80%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
+                            : <div style={{ fontSize: 18, opacity: .3 }}>{label.split(" ")[0]}</div>}
+                          <div style={{ fontSize: 9, color: "#aaa", marginTop: 2 }}>{label.split(" ")[1]}</div>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
