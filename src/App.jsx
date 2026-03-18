@@ -1,10 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
-);
+import { useState, useRef, useEffect } from "react";
 
 const CONDITIONS = ["Deadstock", "Excellent", "Good", "Fair", "Worn"];
 const EMPTY_FORM = {
@@ -12,6 +6,18 @@ const EMPTY_FORM = {
   purchasePrice: "", currentValue: "", condition: "Excellent",
   photo: null, photoUrl: "", barcode: "", styleId: ""
 };
+
+const STORAGE_KEY = "sole-catalog-sneakers";
+
+function loadSneakers() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; }
+}
+
+function saveSneakers(sneakers) {
+  // Strip non-serializable photo File objects before saving
+  const clean = sneakers.map(({ photo, ...s }) => s);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
+}
 
 async function readLabelImage(file, apiKey) {
   const base64 = await new Promise((res, rej) => {
@@ -92,13 +98,7 @@ function conditionColor(c) {
 const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
 export default function SneakerCatalog() {
-  const [user, setUser] = useState(null);
-  const [authMode, setAuthMode] = useState("login"); // login | signup
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [authError, setAuthError] = useState("");
-  const [authLoading, setAuthLoading] = useState(false);
-  const [sneakers, setSneakers] = useState([]);
+  const [sneakers, setSneakers] = useState(loadSneakers);
   const [view, setView] = useState("catalog");
   const [addMode, setAddMode] = useState("scan");
   const [form, setForm] = useState(EMPTY_FORM);
@@ -115,47 +115,18 @@ export default function SneakerCatalog() {
   const [lookingUp, setLookingUp] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [labelPreview, setLabelPreview] = useState(null);
-  const [saving, setSaving] = useState(false);
   const labelRef = useRef();
   const photoRef = useRef();
   const csvRef = useRef();
 
-  // ── Auth ──
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-    });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
-      setUser(session?.user ?? null);
-    });
-    return () => subscription.unsubscribe();
-  }, []);
+  // Persist to localStorage whenever sneakers change
+  useEffect(() => { saveSneakers(sneakers); }, [sneakers]);
 
-  // ── Load sneakers from Supabase ──
-  useEffect(() => {
-    if (!user) { setSneakers([]); return; }
-    supabase.from("sneakers").select("*").order("created_at", { ascending: false })
-      .then(({ data }) => {
-        if (data) setSneakers(data.map(s => ({
-          id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
-          size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
-          condition: s.condition || "Excellent", photoUrl: s.photo_url || "",
-          barcode: s.barcode || "", styleId: s.style_id || ""
-        })));
-      });
-  }, [user]);
-
-  const handleAuth = async () => {
-    setAuthError(""); setAuthLoading(true);
-    const fn = authMode === "login" ? supabase.auth.signInWithPassword : supabase.auth.signUp;
-    const { error } = await fn.call(supabase.auth, { email, password });
-    setAuthLoading(false);
-    if (error) setAuthError(error.message);
+  const goBack = () => {
+    setView("catalog"); setAddMode("scan"); setScanFound(null);
+    setScanStatus(""); setLabelPreview(null); setEditingId(null); setForm(EMPTY_FORM);
   };
 
-  const handleSignOut = async () => { await supabase.auth.signOut(); setSneakers([]); };
-
-  // ── Label scan ──
   const handleLabelScan = async (file) => {
     if (!file) return;
     setLabelPreview(URL.createObjectURL(file));
@@ -205,105 +176,49 @@ export default function SneakerCatalog() {
   const handleCsv = (file) => {
     setCsvError("");
     const reader = new FileReader();
-    reader.onload = async (e) => {
+    reader.onload = (e) => {
       const parsed = parseCsv(e.target.result);
       if (!parsed.length) { setCsvError("Couldn't parse file. Check column headers."); return; }
-      for (const s of parsed) await saveSneaker(s);
+      setSneakers(prev => {
+        const updated = [...parsed.map((s, i) => ({ ...s, id: Date.now() + i })), ...prev];
+        saveSneakers(updated);
+        return updated;
+      });
     };
     reader.readAsText(file);
   };
 
-  const saveSneaker = async (sneakerData, id = null) => {
-    const row = {
-      user_id: user.id,
-      brand: sneakerData.brand, model: sneakerData.model, colorway: sneakerData.colorway,
-      size: sneakerData.size, purchase_price: sneakerData.purchasePrice,
-      current_value: sneakerData.currentValue, condition: sneakerData.condition,
-      photo_url: sneakerData.photoUrl || "", barcode: sneakerData.barcode, style_id: sneakerData.styleId
-    };
-    if (id) {
-      const { data } = await supabase.from("sneakers").update(row).eq("id", id).select().single();
-      return data;
-    } else {
-      const { data } = await supabase.from("sneakers").insert(row).select().single();
-      return data;
-    }
-  };
-
-  const addSneaker = async () => {
+  const addSneaker = () => {
     if (!form.brand || !form.model) return;
-    setSaving(true);
-    if (editingId) {
-      const data = await saveSneaker(form, editingId);
-      if (data) setSneakers(prev => prev.map(s => s.id === editingId ? { ...form, id: editingId, photoUrl: form.photoUrl } : s));
-    } else {
-      const data = await saveSneaker(form);
-      if (data) setSneakers(prev => [{ ...form, id: data.id, photoUrl: form.photoUrl }, ...prev]);
-    }
-    setSaving(false);
+    setSneakers(prev => {
+      const updated = editingId
+        ? prev.map(s => s.id === editingId ? { ...form, id: editingId } : s)
+        : [{ ...form, id: Date.now() }, ...prev];
+      saveSneakers(updated);
+      return updated;
+    });
     setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle("");
     setLabelPreview(null); setView("catalog"); setAddMode("scan"); setScanStatus(""); setEditingId(null);
   };
 
-  const deleteSneaker = async (id) => {
-    await supabase.from("sneakers").delete().eq("id", id);
-    setSneakers(prev => prev.filter(s => s.id !== id));
+  const deleteSneaker = (id) => {
+    setSneakers(prev => { const updated = prev.filter(s => s.id !== id); saveSneakers(updated); return updated; });
     setView("catalog");
   };
 
   const startEdit = (s) => {
     setForm({ ...s, photo: null });
-    setEditingId(s.id);
-    setScanFound(null); setLabelPreview(null); setScanStatus("");
+    setEditingId(s.id); setScanFound(null); setLabelPreview(null); setScanStatus("");
     setAddMode("form"); setView("add");
-  };
-
-  const goBack = () => {
-    setView("catalog"); setAddMode("scan"); setScanFound(null);
-    setScanStatus(""); setLabelPreview(null); setEditingId(null); setForm(EMPTY_FORM);
   };
 
   const filtered = sneakers
     .filter(s => filterCondition === "All" || s.condition === filterCondition)
     .filter(s => { const q = search.toLowerCase(); return !q || s.brand.toLowerCase().includes(q) || s.model.toLowerCase().includes(q) || (s.colorway || "").toLowerCase().includes(q); })
-    .sort((a, b) => sortBy === "newest" ? 0 : sortBy === "brand" ? a.brand.localeCompare(b.brand) : (parseFloat(b.currentValue) || 0) - (parseFloat(a.currentValue) || 0));
+    .sort((a, b) => sortBy === "brand" ? a.brand.localeCompare(b.brand) : sortBy === "value" ? (parseFloat(b.currentValue) || 0) - (parseFloat(a.currentValue) || 0) : b.id - a.id);
 
   const totalValue = sneakers.reduce((acc, s) => acc + (parseFloat(s.currentValue) || 0), 0);
   const totalPaid = sneakers.reduce((acc, s) => acc + (parseFloat(s.purchasePrice) || 0), 0);
-
-  // ── Auth screen ──
-  if (!user) return (
-    <div style={{ fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", minHeight: "100vh", background: "#fafaf8", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&display=swap'); *{box-sizing:border-box;margin:0;padding:0} .inp{width:100%;border:1px solid #e0deda;border-radius:8px;padding:10px 13px;font-size:14px;background:#fafaf8;outline:none;transition:border .15s;font-family:inherit} .inp:focus{border-color:#111;background:#fff} .btn{cursor:pointer;border:none;border-radius:8px;font-family:inherit;font-weight:500;transition:all .15s} .btn-primary{background:#111;color:#fff;padding:10px 22px;font-size:14px;width:100%} .btn-primary:hover{background:#333} .btn-primary:disabled{background:#ccc;cursor:default}`}</style>
-      <div style={{ width: "100%", maxWidth: 380, padding: "0 24px" }}>
-        <div style={{ textAlign: "center", marginBottom: 32 }}>
-          <div style={{ fontFamily: "'DM Serif Display',serif", fontSize: 32, marginBottom: 6 }}>Sole</div>
-          <div style={{ color: "#aaa", fontSize: 14 }}>Your sneaker collection, everywhere</div>
-        </div>
-        <div style={{ background: "#fff", border: "1px solid #e8e6e1", borderRadius: 16, padding: 28 }}>
-          <div style={{ display: "flex", marginBottom: 24, background: "#f5f4f0", borderRadius: 8, padding: 3 }}>
-            {["login", "signup"].map(m => (
-              <button key={m} className="btn" onClick={() => setAuthMode(m)}
-                style={{ flex: 1, padding: "8px", fontSize: 13, fontWeight: 500, borderRadius: 6, background: authMode === m ? "#fff" : "transparent", color: authMode === m ? "#111" : "#888", boxShadow: authMode === m ? "0 1px 4px rgba(0,0,0,.08)" : "none" }}>
-                {m === "login" ? "Sign In" : "Sign Up"}
-              </button>
-            ))}
-          </div>
-          <div style={{ display: "grid", gap: 12 }}>
-            <div><label style={{ fontSize: 12, fontWeight: 500, color: "#888", letterSpacing: ".04em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Email</label>
-              <input className="inp" type="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAuth()} /></div>
-            <div><label style={{ fontSize: 12, fontWeight: 500, color: "#888", letterSpacing: ".04em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Password</label>
-              <input className="inp" type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAuth()} /></div>
-            {authError && <div style={{ fontSize: 13, color: "#dc2626", background: "#fef2f2", padding: "8px 12px", borderRadius: 6 }}>{authError}</div>}
-            {authMode === "signup" && <div style={{ fontSize: 12, color: "#aaa" }}>After signing up, check your email to confirm your account.</div>}
-            <button className="btn btn-primary" onClick={handleAuth} disabled={authLoading || !email || !password}>
-              {authLoading ? "…" : authMode === "login" ? "Sign In" : "Create Account"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 
   return (
     <div style={{ fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", background: "#fafaf8", minHeight: "100vh", color: "#111" }}>
@@ -334,14 +249,13 @@ export default function SneakerCatalog() {
             <span style={{ fontFamily: "'DM Serif Display',serif", fontSize: 22 }}>Sole</span>
             <span style={{ fontSize: 12, color: "#999", fontWeight: 500 }}>{sneakers.length} pairs</span>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8 }}>
             {view !== "catalog" && <button className="btn btn-ghost" onClick={goBack}>← Back</button>}
             {view === "catalog" && <>
               <label className="btn btn-ghost" style={{ cursor: "pointer", display: "flex", alignItems: "center" }}>
                 Import CSV <input ref={csvRef} type="file" accept=".csv,.tsv" style={{ display: "none" }} onChange={e => e.target.files[0] && handleCsv(e.target.files[0])} />
               </label>
               <button className="btn btn-primary" onClick={() => { setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle(""); setLabelPreview(null); setAddMode("scan"); setScanStatus(""); setEditingId(null); setView("add"); }}>+ Add Sneaker</button>
-              <button className="btn btn-ghost" onClick={handleSignOut} style={{ fontSize: 12, color: "#aaa" }}>Sign out</button>
             </>}
           </div>
         </div>
@@ -420,8 +334,7 @@ export default function SneakerCatalog() {
               <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>Snap a photo of the box label — Claude will read the brand, model, colorway, size, and style code automatically.</p>
               <label style={{ display: "block", marginBottom: 16, cursor: "pointer" }}>
                 <div style={{ background: "#111", color: "#fff", borderRadius: 14, padding: "24px 20px", textAlign: "center" }}>
-                  {lookingUp
-                    ? <div className="pulse" style={{ fontSize: 14 }}>🔍 Reading label…</div>
+                  {lookingUp ? <div className="pulse" style={{ fontSize: 14 }}>🔍 Reading label…</div>
                     : <><div style={{ fontSize: 36, marginBottom: 10 }}>🏷️</div><div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Scan Box Label</div><div style={{ fontSize: 13, opacity: .7 }}>Take a photo of the label on the side of the box</div></>}
                 </div>
                 <input ref={labelRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={e => e.target.files[0] && handleLabelScan(e.target.files[0])} />
@@ -489,9 +402,7 @@ export default function SneakerCatalog() {
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", paddingTop: 4 }}>
                   <button className="btn btn-ghost" onClick={goBack}>Cancel</button>
-                  <button className="btn btn-primary" onClick={addSneaker} disabled={!form.brand || !form.model || saving}>
-                    {saving ? "Saving…" : editingId ? "Save Changes" : "Add to Collection"}
-                  </button>
+                  <button className="btn btn-primary" onClick={addSneaker} disabled={!form.brand || !form.model}>{editingId ? "Save Changes" : "Add to Collection"}</button>
                 </div>
               </div>
             </>}
