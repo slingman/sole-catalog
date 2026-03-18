@@ -10,7 +10,7 @@ const CONDITIONS = ["Deadstock", "Excellent", "Good", "Fair", "Worn"];
 const EMPTY_FORM = {
   brand: "", model: "", colorway: "", size: "",
   purchasePrice: "", currentValue: "", retailPrice: "", releaseYear: "", condition: "Excellent",
-  photo: null, photoUrl: "", barcode: "", styleId: ""
+  photo: null, photoUrl: "", labelPhoto: null, labelPhotoUrl: "", barcode: "", styleId: ""
 };
 
 // Collection code — shared across devices
@@ -124,7 +124,7 @@ function dbToForm(s) {
   return {
     id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
     size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
-    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", condition: s.condition || "Excellent", photoUrl: s.photo_url || "",
+    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", condition: s.condition || "Excellent", photoUrl: s.photo_url || "", labelPhotoUrl: s.label_photo_url || "",
     barcode: s.barcode || "", styleId: s.style_id || ""
   };
 }
@@ -153,6 +153,7 @@ export default function SneakerCatalog() {
   const [saving, setSaving] = useState(false);
   const labelRef = useRef();
   const photoRef = useRef();
+  const labelPhotoRef = useRef();
   const csvRef = useRef();
 
   // Load sneakers when collection code is set
@@ -186,12 +187,14 @@ export default function SneakerCatalog() {
     try {
       const result = await readLabelImage(file, API_KEY);
       if (result && (result.brand || result.model)) {
-        setScanFound(result); setForm(f => ({ ...f, ...result }));
+        const labelUrl = URL.createObjectURL(file);
+        setScanFound(result);
+        setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelUrl }));
         setAddMode("form");
         // Look up retail price + release year in background
         setScanStatus("Looking up retail price & release year…");
         const { retailPrice, releaseYear } = await lookupRetailAndYear(result.brand, result.model, result.styleId, API_KEY);
-        setForm(f => ({ ...f, ...result, retailPrice: retailPrice || "", releaseYear: releaseYear || "" }));
+        setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelUrl, retailPrice: retailPrice || "", releaseYear: releaseYear || "" }));
         setScanStatus("");
       } else {
         setScanStatus("⚠️ Couldn't read label. Fill in details manually.");
@@ -225,6 +228,20 @@ export default function SneakerCatalog() {
     }
   };
 
+  const handleUpdateFromWeb = async () => {
+    if (!form.brand && !form.model && !form.styleId) return;
+    setScanStatus("Updating from web…"); setLookingUp(true);
+    const { retailPrice, releaseYear } = await lookupRetailAndYear(form.brand, form.model, form.styleId, API_KEY);
+    setLookingUp(false);
+    setForm(f => ({
+      ...f,
+      retailPrice: retailPrice || f.retailPrice,
+      releaseYear: releaseYear || f.releaseYear
+    }));
+    setScanStatus(retailPrice || releaseYear ? "✅ Updated!" : "⚠️ Nothing found.");
+    setTimeout(() => setScanStatus(""), 3000);
+  };
+
   const handleSneakerPhoto = (file) => {
     if (!file) return;
     setForm(f => ({ ...f, photo: file, photoUrl: URL.createObjectURL(file) }));
@@ -254,7 +271,7 @@ export default function SneakerCatalog() {
       device_id: collectionCode,
       brand: form.brand, model: form.model, colorway: form.colorway,
       size: form.size, purchase_price: form.purchasePrice, current_value: form.currentValue,
-      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", condition: form.condition, photo_url: form.photoUrl || "",
+      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", condition: form.condition, photo_url: form.photoUrl || "", label_photo_url: form.labelPhotoUrl || "",
       barcode: form.barcode || "", style_id: form.styleId || ""
     };
     if (editingId) {
@@ -451,6 +468,17 @@ export default function SneakerCatalog() {
               </div>
             </>}
             {(addMode === "form" || editingId) && <>
+              {editingId && (
+                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+                  <button className="btn btn-ghost" onClick={handleUpdateFromWeb} disabled={lookingUp}
+                    style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+                    {lookingUp ? "🔍 Searching…" : "🌐 Update from web"}
+                  </button>
+                </div>
+              )}
+              {scanStatus && editingId && (
+                <div style={{ background: "#f5f4f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#555", marginBottom: 12 }}>{scanStatus}</div>
+              )}
               {scanFound && !editingId && (
                 <div style={{ background: scanFound.brand ? "#f0fdf4" : "#fffbeb", border: `1px solid ${scanFound.brand ? "#bbf7d0" : "#fde68a"}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: scanFound.brand ? "#166534" : "#92400e", marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
                   {scanFound.brand ? `✅ Found: ${scanFound.brand} ${scanFound.model}` : "⚠️ Not found — fill in details manually"}
@@ -484,16 +512,27 @@ export default function SneakerCatalog() {
                     ))}
                   </div>
                 </div>
-                <div>
-                  <label className="lbl">Sneaker Photo</label>
-                  <div className={`drop-zone${dragOver ? " over" : ""}`}
-                    onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={e => { e.preventDefault(); setDragOver(false); handleSneakerPhoto(e.dataTransfer.files[0]); }}
-                    onClick={() => photoRef.current?.click()}>
-                    {form.photoUrl ? <img src={form.photoUrl} alt="preview" style={{ height: 100, borderRadius: 8, objectFit: "contain" }} />
-                      : <><div style={{ fontSize: 28, marginBottom: 8 }}>📷</div><div style={{ fontSize: 13, color: "#888" }}>Drop photo here or <span style={{ textDecoration: "underline" }}>browse</span></div></>}
-                    <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleSneakerPhoto(e.target.files[0])} />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                  <div>
+                    <label className="lbl">Sneaker Photo</label>
+                    <div className={`drop-zone${dragOver ? " over" : ""}`}
+                      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                      onDragLeave={() => setDragOver(false)}
+                      onDrop={e => { e.preventDefault(); setDragOver(false); handleSneakerPhoto(e.dataTransfer.files[0]); }}
+                      onClick={() => photoRef.current?.click()}
+                      style={{ padding: "16px 12px" }}>
+                      {form.photoUrl ? <img src={form.photoUrl} alt="sneaker" style={{ height: 80, borderRadius: 6, objectFit: "contain" }} />
+                        : <><div style={{ fontSize: 24, marginBottom: 6 }}>👟</div><div style={{ fontSize: 12, color: "#888" }}>Sneaker photo</div></>}
+                      <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleSneakerPhoto(e.target.files[0])} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="lbl">Box Label Photo</label>
+                    <div className="drop-zone" onClick={() => labelPhotoRef.current?.click()} style={{ padding: "16px 12px" }}>
+                      {form.labelPhotoUrl ? <img src={form.labelPhotoUrl} alt="label" style={{ height: 80, borderRadius: 6, objectFit: "contain" }} />
+                        : <><div style={{ fontSize: 24, marginBottom: 6 }}>🏷️</div><div style={{ fontSize: 12, color: "#888" }}>Label photo</div></>}
+                      <input ref={labelPhotoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => { if (e.target.files[0]) setForm(f => ({ ...f, labelPhoto: e.target.files[0], labelPhotoUrl: URL.createObjectURL(e.target.files[0]) })); }} />
+                    </div>
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", paddingTop: 4 }}>
@@ -511,9 +550,17 @@ export default function SneakerCatalog() {
           return (
             <div style={{ maxWidth: 700, margin: "0 auto" }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32, alignItems: "start" }}>
-                <div style={{ background: "#f5f4f0", borderRadius: 16, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-                  {s.photoUrl ? <img src={s.photoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    : <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div style={{ background: "#f5f4f0", borderRadius: 14, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                    {s.photoUrl ? <img src={s.photoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      : <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
+                  </div>
+                  {s.labelPhotoUrl && (
+                    <div style={{ background: "#f5f4f0", borderRadius: 10, overflow: "hidden", position: "relative" }}>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: "#aaa", textTransform: "uppercase", letterSpacing: ".06em", padding: "6px 10px 0" }}>Box Label</div>
+                      <img src={s.labelPhotoUrl} alt="label" style={{ width: "100%", maxHeight: 120, objectFit: "contain", padding: "6px 10px 10px" }} />
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div style={{ fontSize: 11, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 6 }}>{s.brand}</div>
