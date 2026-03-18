@@ -9,7 +9,7 @@ const supabase = createClient(
 const CONDITIONS = ["Deadstock", "Excellent", "Good", "Fair", "Worn"];
 const EMPTY_FORM = {
   brand: "", model: "", colorway: "", size: "",
-  purchasePrice: "", currentValue: "", condition: "Excellent",
+  purchasePrice: "", currentValue: "", retailPrice: "", releaseYear: "", condition: "Excellent",
   photo: null, photoUrl: "", barcode: "", styleId: ""
 };
 
@@ -76,6 +76,27 @@ async function lookupByCode(code, styleCode, apiKey) {
   return jsonMatch ? JSON.parse(jsonMatch[0]) : null;
 }
 
+async function lookupRetailAndYear(brand, model, styleId, apiKey) {
+  const prompt = `Search the web for the ${brand} ${model}${styleId ? ` style code ${styleId}` : ""}. Find the original retail price (MSRP) and the release year. Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019"}. Just numbers, no $ sign. If not found leave empty string. No markdown, just JSON.`;
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001", max_tokens: 256,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    if (!response.ok) return { retailPrice: "", releaseYear: "" };
+    const data = await response.json();
+    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+    const match = text.match(/\{[^}]+\}/);
+    if (match) return JSON.parse(match[0]);
+  } catch {}
+  return { retailPrice: "", releaseYear: "" };
+}
+
 function parseCsv(text) {
   const lines = text.trim().split("\n");
   if (lines.length < 2) return [];
@@ -103,7 +124,7 @@ function dbToForm(s) {
   return {
     id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
     size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
-    condition: s.condition || "Excellent", photoUrl: s.photo_url || "",
+    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", condition: s.condition || "Excellent", photoUrl: s.photo_url || "",
     barcode: s.barcode || "", styleId: s.style_id || ""
   };
 }
@@ -164,14 +185,19 @@ export default function SneakerCatalog() {
     setScanStatus("Reading label…"); setLookingUp(true);
     try {
       const result = await readLabelImage(file, API_KEY);
-      setLookingUp(false);
       if (result && (result.brand || result.model)) {
         setScanFound(result); setForm(f => ({ ...f, ...result }));
-        setScanStatus(""); setAddMode("form");
+        setAddMode("form");
+        // Look up retail price + release year in background
+        setScanStatus("Looking up retail price & release year…");
+        const { retailPrice, releaseYear } = await lookupRetailAndYear(result.brand, result.model, result.styleId, API_KEY);
+        setForm(f => ({ ...f, ...result, retailPrice: retailPrice || "", releaseYear: releaseYear || "" }));
+        setScanStatus("");
       } else {
         setScanStatus("⚠️ Couldn't read label. Fill in details manually.");
         setTimeout(() => setScanStatus(""), 4000); setAddMode("form");
       }
+      setLookingUp(false);
     } catch {
       setLookingUp(false);
       setScanStatus("⚠️ Error reading label. Try manual entry.");
@@ -228,7 +254,7 @@ export default function SneakerCatalog() {
       device_id: collectionCode,
       brand: form.brand, model: form.model, colorway: form.colorway,
       size: form.size, purchase_price: form.purchasePrice, current_value: form.currentValue,
-      condition: form.condition, photo_url: form.photoUrl || "",
+      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", condition: form.condition, photo_url: form.photoUrl || "",
       barcode: form.barcode || "", style_id: form.styleId || ""
     };
     if (editingId) {
@@ -439,9 +465,11 @@ export default function SneakerCatalog() {
                 <div><label className="lbl">Colorway</label><input className="inp" placeholder="Black/Neon Yellow…" value={form.colorway} onChange={e => setForm(f => ({ ...f, colorway: e.target.value }))} /></div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                   <div><label className="lbl">Style ID</label><input className="inp" placeholder="IO9926 001" value={form.styleId} onChange={e => setForm(f => ({ ...f, styleId: e.target.value }))} /></div>
+                  <div><label className="lbl">Release Year</label><input className="inp" type="number" placeholder="2019" value={form.releaseYear} onChange={e => setForm(f => ({ ...f, releaseYear: e.target.value }))} /></div>
                   <div><label className="lbl">Size (US)</label><input className="inp" type="number" placeholder="9.5" value={form.size} onChange={e => setForm(f => ({ ...f, size: e.target.value }))} /></div>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+                  <div><label className="lbl">Retail ($)</label><input className="inp" type="number" placeholder="120" value={form.retailPrice} onChange={e => setForm(f => ({ ...f, retailPrice: e.target.value }))} /></div>
                   <div><label className="lbl">Paid ($)</label><input className="inp" type="number" placeholder="120" value={form.purchasePrice} onChange={e => setForm(f => ({ ...f, purchasePrice: e.target.value }))} /></div>
                   <div><label className="lbl">Value ($)</label><input className="inp" type="number" placeholder="200" value={form.currentValue} onChange={e => setForm(f => ({ ...f, currentValue: e.target.value }))} /></div>
                 </div>
@@ -495,6 +523,8 @@ export default function SneakerCatalog() {
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                     {[
                       { l: "Size", v: s.size ? `US ${s.size}` : "—" },
+                      { l: "Year", v: s.releaseYear || "—" },
+                      { l: "Retail", v: s.retailPrice ? `$${parseFloat(s.retailPrice).toLocaleString()}` : "—" },
                       { l: "Paid", v: s.purchasePrice ? `$${parseFloat(s.purchasePrice).toLocaleString()}` : "—" },
                       { l: "Est. Value", v: s.currentValue ? `$${parseFloat(s.currentValue).toLocaleString()}` : "—" },
                       { l: "Gain / Loss", v: gain !== null ? `${gain >= 0 ? "+" : ""}$${gain.toLocaleString()}` : "—", c: gain > 0 ? "#22c55e" : gain < 0 ? "#ef4444" : undefined },
