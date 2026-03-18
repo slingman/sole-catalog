@@ -130,8 +130,12 @@ Return ONLY a JSON object: {"retailPrice":"120","releaseYear":"2019","webPhotoUr
     const data = await response.json();
     const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
     const match = text.match(/\{[\s\S]*?\}/);
-    if (match) return JSON.parse(match[0]);
-  } catch {}
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      console.log("Lookup result:", parsed);
+      return parsed;
+    }
+  } catch (e) { console.error("Lookup error:", e); }
   return { retailPrice: "", releaseYear: "", webPhotoUrl: "" };
 }
 
