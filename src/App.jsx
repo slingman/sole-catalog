@@ -262,16 +262,22 @@ export default function SneakerCatalog() {
     setScanStatus("Searching…"); setLookingUp(true);
     try {
       const result = await lookupByCode(manualCode.trim(), manualStyle.trim(), API_KEY);
-      setLookingUp(false);
       if (result && (result.brand || result.model)) {
-        setScanFound(result); setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
-        setScanStatus(""); setAddMode("form");
+        setScanFound(result);
+        setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
+        setAddMode("form");
+        // Also fetch retail price, year, web photo
+        setScanStatus("Looking up retail price, year & web photo…");
+        const { retailPrice, releaseYear, webPhotoUrl } = await lookupRetailAndYear(result.brand, result.model, result.styleId || manualStyle.trim(), API_KEY);
+        setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode, retailPrice: retailPrice || "", releaseYear: releaseYear || "", webPhotoUrl: webPhotoUrl || "" }));
+        setScanStatus("");
       } else {
         setScanFound({ barcode: manualCode, styleId: manualStyle });
         setForm(f => ({ ...f, barcode: manualCode, styleId: manualStyle }));
         setScanStatus("⚠️ No match found. Fill in details manually.");
         setTimeout(() => setScanStatus(""), 4000); setAddMode("form");
       }
+      setLookingUp(false);
     } catch {
       setLookingUp(false); setScanStatus("⚠️ Lookup failed."); setTimeout(() => setScanStatus(""), 4000); setAddMode("form");
     }
