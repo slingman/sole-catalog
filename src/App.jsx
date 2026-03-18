@@ -35,15 +35,21 @@ async function compressAndUpload(file, path) {
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
       canvas.toBlob(async (blob) => {
+        console.log("Uploading to Supabase Storage:", path, "size:", blob.size);
         const { data, error } = await supabase.storage
           .from("sneaker-photos")
           .upload(path, blob, { contentType: "image/jpeg", upsert: true });
-        if (error) { resolve(""); return; }
+        if (error) {
+          console.error("Storage upload error:", error.message, error);
+          resolve(""); return;
+        }
+        console.log("Upload success:", data);
         const { data: { publicUrl } } = supabase.storage.from("sneaker-photos").getPublicUrl(path);
+        console.log("Public URL:", publicUrl);
         resolve(publicUrl);
       }, "image/jpeg", 0.8);
     };
-    img.onerror = () => resolve("");
+    img.onerror = (e) => { console.error("Image load error", e); resolve(""); };
     img.src = url;
   });
 }
