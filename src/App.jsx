@@ -1,4 +1,10 @@
 import { useState, useRef, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
 
 const CONDITIONS = ["Deadstock", "Excellent", "Good", "Fair", "Worn"];
 const EMPTY_FORM = {
@@ -7,17 +13,14 @@ const EMPTY_FORM = {
   photo: null, photoUrl: "", barcode: "", styleId: ""
 };
 
-const STORAGE_KEY = "sole-catalog-sneakers";
-
-function loadSneakers() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; }
+// Stable device ID stored in localStorage
+function getDeviceId() {
+  let id = localStorage.getItem("sole-device-id");
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem("sole-device-id", id); }
+  return id;
 }
 
-function saveSneakers(sneakers) {
-  // Strip non-serializable photo File objects before saving
-  const clean = sneakers.map(({ photo, ...s }) => s);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
-}
+const DEVICE_ID = getDeviceId();
 
 async function readLabelImage(file, apiKey) {
   const base64 = await new Promise((res, rej) => {
@@ -97,8 +100,18 @@ function conditionColor(c) {
 
 const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
+function dbToForm(s) {
+  return {
+    id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
+    size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
+    condition: s.condition || "Excellent", photoUrl: s.photo_url || "",
+    barcode: s.barcode || "", styleId: s.style_id || ""
+  };
+}
+
 export default function SneakerCatalog() {
-  const [sneakers, setSneakers] = useState(loadSneakers);
+  const [sneakers, setSneakers] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [view, setView] = useState("catalog");
   const [addMode, setAddMode] = useState("scan");
   const [form, setForm] = useState(EMPTY_FORM);
@@ -115,12 +128,21 @@ export default function SneakerCatalog() {
   const [lookingUp, setLookingUp] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [labelPreview, setLabelPreview] = useState(null);
+  const [saving, setSaving] = useState(false);
   const labelRef = useRef();
   const photoRef = useRef();
   const csvRef = useRef();
 
-  // Persist to localStorage whenever sneakers change
-  useEffect(() => { saveSneakers(sneakers); }, [sneakers]);
+  // Load all sneakers for this device
+  useEffect(() => {
+    supabase.from("sneakers").select("*")
+      .eq("device_id", DEVICE_ID)
+      .order("created_at", { ascending: false })
+      .then(({ data, error }) => {
+        if (data) setSneakers(data.map(dbToForm));
+        setLoading(false);
+      });
+  }, []);
 
   const goBack = () => {
     setView("catalog"); setAddMode("scan"); setScanFound(null);
@@ -176,33 +198,45 @@ export default function SneakerCatalog() {
   const handleCsv = (file) => {
     setCsvError("");
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const parsed = parseCsv(e.target.result);
       if (!parsed.length) { setCsvError("Couldn't parse file. Check column headers."); return; }
-      setSneakers(prev => {
-        const updated = [...parsed.map((s, i) => ({ ...s, id: Date.now() + i })), ...prev];
-        saveSneakers(updated);
-        return updated;
-      });
+      const rows = parsed.map(s => ({
+        device_id: DEVICE_ID, brand: s.brand, model: s.model, colorway: s.colorway,
+        size: s.size, purchase_price: s.purchasePrice, current_value: s.currentValue,
+        condition: s.condition, photo_url: "", barcode: s.barcode || "", style_id: s.styleId || ""
+      }));
+      const { data } = await supabase.from("sneakers").insert(rows).select();
+      if (data) setSneakers(prev => [...data.map(dbToForm), ...prev]);
     };
     reader.readAsText(file);
   };
 
-  const addSneaker = () => {
+  const addSneaker = async () => {
     if (!form.brand || !form.model) return;
-    setSneakers(prev => {
-      const updated = editingId
-        ? prev.map(s => s.id === editingId ? { ...form, id: editingId } : s)
-        : [{ ...form, id: Date.now() }, ...prev];
-      saveSneakers(updated);
-      return updated;
-    });
+    setSaving(true);
+    const row = {
+      device_id: DEVICE_ID,
+      brand: form.brand, model: form.model, colorway: form.colorway,
+      size: form.size, purchase_price: form.purchasePrice, current_value: form.currentValue,
+      condition: form.condition, photo_url: form.photoUrl || "",
+      barcode: form.barcode || "", style_id: form.styleId || ""
+    };
+    if (editingId) {
+      const { data } = await supabase.from("sneakers").update(row).eq("id", editingId).select().single();
+      if (data) setSneakers(prev => prev.map(s => s.id === editingId ? dbToForm(data) : s));
+    } else {
+      const { data } = await supabase.from("sneakers").insert(row).select().single();
+      if (data) setSneakers(prev => [dbToForm(data), ...prev]);
+    }
+    setSaving(false);
     setForm(EMPTY_FORM); setScanFound(null); setManualCode(""); setManualStyle("");
     setLabelPreview(null); setView("catalog"); setAddMode("scan"); setScanStatus(""); setEditingId(null);
   };
 
-  const deleteSneaker = (id) => {
-    setSneakers(prev => { const updated = prev.filter(s => s.id !== id); saveSneakers(updated); return updated; });
+  const deleteSneaker = async (id) => {
+    await supabase.from("sneakers").delete().eq("id", id);
+    setSneakers(prev => prev.filter(s => s.id !== id));
     setView("catalog");
   };
 
@@ -215,10 +249,16 @@ export default function SneakerCatalog() {
   const filtered = sneakers
     .filter(s => filterCondition === "All" || s.condition === filterCondition)
     .filter(s => { const q = search.toLowerCase(); return !q || s.brand.toLowerCase().includes(q) || s.model.toLowerCase().includes(q) || (s.colorway || "").toLowerCase().includes(q); })
-    .sort((a, b) => sortBy === "brand" ? a.brand.localeCompare(b.brand) : sortBy === "value" ? (parseFloat(b.currentValue) || 0) - (parseFloat(a.currentValue) || 0) : b.id - a.id);
+    .sort((a, b) => sortBy === "brand" ? a.brand.localeCompare(b.brand) : sortBy === "value" ? (parseFloat(b.currentValue) || 0) - (parseFloat(a.currentValue) || 0) : 0);
 
   const totalValue = sneakers.reduce((acc, s) => acc + (parseFloat(s.currentValue) || 0), 0);
   const totalPaid = sneakers.reduce((acc, s) => acc + (parseFloat(s.purchasePrice) || 0), 0);
+
+  if (loading) return (
+    <div style={{ fontFamily: "'DM Sans',sans-serif", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#fafaf8" }}>
+      <div style={{ fontFamily: "'DM Serif Display',serif", fontSize: 28, color: "#ccc" }}>Sole</div>
+    </div>
+  );
 
   return (
     <div style={{ fontFamily: "'DM Sans','Helvetica Neue',Arial,sans-serif", background: "#fafaf8", minHeight: "100vh", color: "#111" }}>
@@ -242,7 +282,6 @@ export default function SneakerCatalog() {
         ::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-thumb{background:#ddd;border-radius:3px}
       `}</style>
 
-      {/* Header */}
       <div style={{ borderBottom: "1px solid #e8e6e1", background: "#fff", position: "sticky", top: 0, zIndex: 100 }}>
         <div style={{ maxWidth: 1100, margin: "0 auto", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 60 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
@@ -262,8 +301,6 @@ export default function SneakerCatalog() {
       </div>
 
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: "32px 24px" }}>
-
-        {/* ── CATALOG ── */}
         {view === "catalog" && <>
           {sneakers.length > 0 && (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 32 }}>
@@ -325,11 +362,9 @@ export default function SneakerCatalog() {
           )}
         </>}
 
-        {/* ── ADD / EDIT ── */}
         {view === "add" && (
           <div style={{ maxWidth: 560, margin: "0 auto" }}>
             <h1 style={{ fontFamily: "'DM Serif Display',serif", fontSize: 28, marginBottom: 6 }}>{editingId ? "Edit Sneaker" : "Add Sneaker"}</h1>
-
             {addMode === "scan" && !editingId && <>
               <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>Snap a photo of the box label — Claude will read the brand, model, colorway, size, and style code automatically.</p>
               <label style={{ display: "block", marginBottom: 16, cursor: "pointer" }}>
@@ -355,7 +390,6 @@ export default function SneakerCatalog() {
                 <button className="btn btn-ghost" onClick={() => setAddMode("form")} style={{ fontSize: 12, color: "#aaa", border: "none" }}>Skip — fill in manually</button>
               </div>
             </>}
-
             {(addMode === "form" || editingId) && <>
               {scanFound && !editingId && (
                 <div style={{ background: scanFound.brand ? "#f0fdf4" : "#fffbeb", border: `1px solid ${scanFound.brand ? "#bbf7d0" : "#fde68a"}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: scanFound.brand ? "#166534" : "#92400e", marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
@@ -402,14 +436,13 @@ export default function SneakerCatalog() {
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", paddingTop: 4 }}>
                   <button className="btn btn-ghost" onClick={goBack}>Cancel</button>
-                  <button className="btn btn-primary" onClick={addSneaker} disabled={!form.brand || !form.model}>{editingId ? "Save Changes" : "Add to Collection"}</button>
+                  <button className="btn btn-primary" onClick={addSneaker} disabled={!form.brand || !form.model || saving}>{saving ? "Saving…" : editingId ? "Save Changes" : "Add to Collection"}</button>
                 </div>
               </div>
             </>}
           </div>
         )}
 
-        {/* ── DETAIL ── */}
         {view === "detail" && selected && (() => {
           const s = sneakers.find(x => x.id === selected.id) || selected;
           const gain = s.currentValue && s.purchasePrice ? parseFloat(s.currentValue) - parseFloat(s.purchasePrice) : null;
