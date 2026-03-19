@@ -602,18 +602,11 @@ export default function SneakerCatalog() {
                   <label className="lbl">Photos</label>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
                     <div>
-                      <div style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginBottom: 5 }}>🌐 Resale</div>
-                      <div style={{ display: "grid", gap: 6 }}>
-                        {[
-                          { name: "StockX", url: `https://stockx.com/search?s=${encodeURIComponent(`${form.brand} ${form.model} ${form.styleId || ""}`)}`, color: "#08a05c" },
-                          { name: "GOAT", url: `https://www.goat.com/search?query=${encodeURIComponent(`${form.brand} ${form.model} ${form.styleId || ""}`)}`, color: "#000" },
-                          { name: "Google", url: `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(`${form.brand} ${form.model} ${form.colorway || form.styleId || ""}`)}`, color: "#4285f4" },
-                        ].map(({ name, url, color }) => (
-                          <a key={name} href={url} target="_blank" rel="noopener noreferrer"
-                            style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#f5f4f0", borderRadius: 6, padding: "8px", fontSize: 12, fontWeight: 500, color, textDecoration: "none", border: "1px solid #e8e6e1" }}>
-                            {name}
-                          </a>
-                        ))}
+                      <div style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginBottom: 5 }}>🌐 Web Photo</div>
+                      <div style={{ background: "#f5f4f0", borderRadius: 8, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", border: "1px solid #e8e6e1" }}>
+                        {form.webPhotoUrl
+                          ? <img src={`https://images.weserv.nl/?url=${encodeURIComponent(form.webPhotoUrl)}&w=400&h=400&fit=cover&output=webp`} alt="web" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { e.target.style.display="none"; e.target.nextSibling && (e.target.nextSibling.style.display="flex"); }} />
+                          : <div style={{ fontSize: 11, color: "#ccc", textAlign: "center", padding: 8 }}>Auto-filled on scan</div>}
                       </div>
                     </div>
                     <div>
@@ -667,30 +660,18 @@ export default function SneakerCatalog() {
                       : <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
                   </div>
                   {/* Thumbnails row */}
-                  {(s.photoUrl || s.labelPhotoUrl || s.brand) && (
+                  {(s.photoUrl || s.webPhotoUrl || s.labelPhotoUrl) && (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
-                      <div style={{ display: "grid", gap: 4 }}>
-                        {[
-                          { name: "StockX", url: `https://stockx.com/search?s=${encodeURIComponent(`${s.brand} ${s.model} ${s.styleId || ""}`)}`, color: "#08a05c" },
-                          { name: "GOAT", url: `https://www.goat.com/search?query=${encodeURIComponent(`${s.brand} ${s.model} ${s.styleId || ""}`)}`, color: "#000" },
-                          { name: "Google", url: `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(`${s.brand} ${s.model} ${s.colorway || s.styleId || ""}`)}`, color: "#4285f4" },
-                        ].map(({ name, url, color }) => (
-                          <a key={name} href={url} target="_blank" rel="noopener noreferrer"
-                            style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "#f5f4f0", borderRadius: 6, padding: "5px 4px", fontSize: 10, fontWeight: 600, color, textDecoration: "none", border: "1px solid #e8e6e1" }}>
-                            {name}
-                          </a>
-                        ))}
-                      </div>
                       {[
-                        { url: s.webPhotoUrl ? `https://images.weserv.nl/?url=${encodeURIComponent(s.webPhotoUrl)}&w=200&h=200&fit=cover&output=webp` : "", label: "Web" },
-                        { url: s.photoUrl, label: "Mine" },
-                        { url: s.labelPhotoUrl, label: "Label" },
+                        { url: s.webPhotoUrl ? `https://images.weserv.nl/?url=${encodeURIComponent(s.webPhotoUrl)}&w=200&h=200&fit=cover&output=webp` : "", label: "🌐 Web" },
+                        { url: s.photoUrl, label: "📸 Mine" },
+                        { url: s.labelPhotoUrl, label: "🏷️ Label" },
                       ].map(({ url, label }) => (
                         <div key={label} style={{ background: "#f5f4f0", borderRadius: 8, overflow: "hidden", aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", border: "1px solid #e8e6e1" }}>
                           {url
                             ? <img src={url} alt={label} style={{ width: "100%", height: "80%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
-                            : <div style={{ fontSize: 16, opacity: .3 }}>📷</div>}
-                          <div style={{ fontSize: 9, color: "#aaa", marginTop: 2 }}>{label}</div>
+                            : <div style={{ fontSize: 14, opacity: .3 }}>{label.split(" ")[0]}</div>}
+                          <div style={{ fontSize: 9, color: "#aaa", marginTop: 2 }}>{label.split(" ")[1]}</div>
                         </div>
                       ))}
                     </div>
