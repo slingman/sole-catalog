@@ -119,14 +119,17 @@ async function lookupByCode(code, styleCode, apiKey) {
 async function lookupRetailAndYear(brand, model, styleId, apiKey) {
   const prompt = `Search the web for "${brand} ${model}${styleId ? ` ${styleId}` : ""}". Find:
 1. Original retail price (MSRP) in USD — number only, no $ sign
-2. Release year — 4 digits only  
-3. A direct working image URL for this sneaker. Try these in order:
-   - Search goat.com and look for an image URL from image.goat.com (format: https://image.goat.com/attachments/product_template_pictures/images/NNN/original/STYLE.png)
-   - Search kicksonfire.com or sneakernews.com and extract a direct .jpg image URL from their article
-   - Search google images and find a direct .jpg or .png product image URL
-   The URL must end in .jpg, .jpeg, .png, or .webp and be a direct image file, not a page.
+2. Release year — 4 digits only
+3. A direct image URL from ONLY these allowed domains (they permit hotlinking):
+   - image.goat.com (preferred — format: https://image.goat.com/750/attachments/product_template_pictures/images/...)
+   - images.stockx.com
+   - cdn.flightclub.com
+   - sneakernews.com/wp-content/uploads/
+   - nicekicks.com/files/
+   DO NOT return URLs from: footdistrict, footlocker, jdsports, size, END, schuh, zalando, or any retailer shop. These block hotlinking.
+   If you cannot find a URL from the allowed domains, return empty string for webPhotoUrl.
 
-Return ONLY JSON: {"retailPrice":"170","releaseYear":"2024","webPhotoUrl":"https://image.goat.com/..."} No markdown. Use empty string if not found.`;
+Return ONLY JSON: {"retailPrice":"170","releaseYear":"2024","webPhotoUrl":"https://image.goat.com/..."} No markdown.`;
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -137,6 +140,11 @@ Return ONLY JSON: {"retailPrice":"170","releaseYear":"2024","webPhotoUrl":"https
         messages: [{ role: "user", content: prompt }]
       })
     });
+    if (response.status === 429) {
+      console.warn("Rate limited, retrying in 3s...");
+      await new Promise(r => setTimeout(r, 3000));
+      return lookupRetailAndYear(brand, model, styleId, apiKey);
+    }
     if (!response.ok) return { retailPrice: "", releaseYear: "", webPhotoUrl: "" };
     const data = await response.json();
     const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
@@ -174,11 +182,15 @@ function conditionColor(c) {
 
 const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
+function isBlobUrl(url) { return url && url.startsWith("blob:"); }
+
 function dbToForm(s) {
   return {
     id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
     size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
-    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", webPhotoUrl: s.web_photo_url || "", condition: s.condition || "Excellent", photoUrl: s.photo_url || "", labelPhotoUrl: s.label_photo_url || "",
+    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", webPhotoUrl: s.web_photo_url || "", condition: s.condition || "Excellent",
+    photoUrl: isBlobUrl(s.photo_url) ? "" : (s.photo_url || ""),
+    labelPhotoUrl: isBlobUrl(s.label_photo_url) ? "" : (s.label_photo_url || ""),
     barcode: s.barcode || "", styleId: s.style_id || ""
   };
 }
