@@ -100,34 +100,32 @@ Return ONLY a single JSON object with all fields: {"brand":"Nike","model":"Air M
   return JSON.parse(jsonMatch[0]);
 }
 
-// Web lookup only (for manual code entry and "Update from web")
-async function lookupByCode(code, styleCode, apiKey) {
-  const prompt = styleCode
-    ? `Search the web for sneaker with style code "${styleCode}"${code ? ` (UPC: ${code})` : ""}. Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"${styleCode}","retailPrice":"","releaseYear":"","webPhotoUrl":""}. No markdown.`
-    : `Search the web for sneaker UPC ${code}. Return ONLY JSON: {"brand":"Nike","model":"Air Force 1","colorway":"White","size":"","styleId":"","retailPrice":"","releaseYear":"","webPhotoUrl":""}. No markdown.`;
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001", max_tokens: 512,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-  if (!response.ok) throw new Error(`API error ${response.status}`);
-  const data = await response.json();
-  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-  const jsonMatch = text.match(/\{[\s\S]*?\}/);
-  return jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+// Cache lookup results in localStorage to avoid repeat API calls
+const LOOKUP_CACHE_KEY = "sole-lookup-cache";
+function getCached(key) {
+  try { const c = JSON.parse(localStorage.getItem(LOOKUP_CACHE_KEY) || "{}"); return c[key] || null; } catch { return null; }
+}
+function setCached(key, value) {
+  try { const c = JSON.parse(localStorage.getItem(LOOKUP_CACHE_KEY) || "{}"); c[key] = value; localStorage.setItem(LOOKUP_CACHE_KEY, JSON.stringify(c)); } catch {}
 }
 
-async function lookupRetailAndYear(brand, model, styleId, apiKey) {
-  const prompt = `Search the web for "${brand} ${model}${styleId ? ` ${styleId}` : ""}". Find:
-1. Original retail price (MSRP) in USD — number only, no $ sign
-2. Release year — 4 digits only
-3. A direct image URL from ONLY: image.goat.com, images.stockx.com, cdn.flightclub.com, sneakernews.com/wp-content/uploads/, nicekicks.com/files/. DO NOT use footdistrict, footlocker, jdsports, zalando or any retailer.
+// Single unified web lookup — used for both manual entry and "Update from web"
+async function webLookup(query, apiKey) {
+  const cached = getCached(query);
+  if (cached) { console.log("Cache hit:", query); return cached; }
 
-Return ONLY JSON: {"retailPrice":"170","releaseYear":"2024","webPhotoUrl":""} No markdown.`;
+  const prompt = `Search the web for sneaker: "${query}". Find ALL of the following:
+1. Brand (e.g. Nike, Adidas, Jordan)
+2. Model name (e.g. Air Max 95, Yeezy Boost 350)
+3. Colorway (e.g. Black/Neon Yellow)
+4. US size if determinable from a UPC code
+5. Style/product code (e.g. IO9926-001)
+6. Original retail price MSRP in USD — number only
+7. Release year — 4 digits
+8. A direct image URL from ONLY these hotlink-friendly domains: image.goat.com, images.stockx.com, cdn.flightclub.com, sneakernews.com/wp-content/uploads/, nicekicks.com/files/. Do NOT use footdistrict, footlocker, jdsports, zalando or other retailers.
+
+Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"IO9926 001","retailPrice":"160","releaseYear":"2024","webPhotoUrl":""}. No markdown.`;
+
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -140,19 +138,20 @@ Return ONLY JSON: {"retailPrice":"170","releaseYear":"2024","webPhotoUrl":""} No
     });
     if (response.status === 429) {
       await new Promise(r => setTimeout(r, 3000));
-      return lookupRetailAndYear(brand, model, styleId, apiKey);
+      return webLookup(query, apiKey);
     }
-    if (!response.ok) return { retailPrice: "", releaseYear: "", webPhotoUrl: "" };
+    if (!response.ok) return null;
     const data = await response.json();
     const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
     const match = text.match(/\{[\s\S]*?\}/);
     if (match) {
       const parsed = JSON.parse(match[0]);
       console.log("Lookup result:", parsed);
-      return { retailPrice: parsed.retailPrice || "", releaseYear: parsed.releaseYear || "", webPhotoUrl: parsed.webPhotoUrl || "" };
+      setCached(query, parsed);
+      return parsed;
     }
   } catch (e) { console.error("Lookup error:", e); }
-  return { retailPrice: "", releaseYear: "", webPhotoUrl: "" };
+  return null;
 }
 
 function parseCsv(text) {
@@ -276,7 +275,8 @@ export default function SneakerCatalog() {
     if (!manualCode.trim() && !manualStyle.trim()) return;
     setScanStatus("Searching…"); setLookingUp(true);
     try {
-      const result = await lookupByCode(manualCode.trim(), manualStyle.trim(), API_KEY);
+      const query = manualStyle.trim() || manualCode.trim();
+      const result = await webLookup(query, API_KEY);
       if (result && (result.brand || result.model)) {
         setScanFound(result);
         setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
@@ -297,15 +297,20 @@ export default function SneakerCatalog() {
   const handleUpdateFromWeb = async () => {
     if (!form.brand && !form.model && !form.styleId) return;
     setScanStatus("Updating from web…"); setLookingUp(true);
-    const { retailPrice, releaseYear, webPhotoUrl } = await lookupRetailAndYear(form.brand, form.model, form.styleId, API_KEY);
+    const query = form.styleId || `${form.brand} ${form.model} ${form.colorway || ""}`.trim();
+    const result = await webLookup(query, API_KEY);
     setLookingUp(false);
-    setForm(f => ({
-      ...f,
-      retailPrice: retailPrice || f.retailPrice,
-      releaseYear: releaseYear || f.releaseYear,
-      webPhotoUrl: webPhotoUrl || f.webPhotoUrl
-    }));
-    setScanStatus(retailPrice || releaseYear ? "✅ Updated!" : "⚠️ Nothing found.");
+    if (result) {
+      setForm(f => ({
+        ...f,
+        retailPrice: result.retailPrice || f.retailPrice,
+        releaseYear: result.releaseYear || f.releaseYear,
+        webPhotoUrl: result.webPhotoUrl || f.webPhotoUrl
+      }));
+      setScanStatus(result.retailPrice || result.releaseYear ? "✅ Updated!" : "⚠️ Nothing found.");
+    } else {
+      setScanStatus("⚠️ Nothing found.");
+    }
     setTimeout(() => setScanStatus(""), 3000);
   };
 
