@@ -13,22 +13,14 @@ const EMPTY_FORM = {
   photo: null, photoUrl: "", webPhotoUrl: "", labelPhoto: null, labelPhotoUrl: "", barcode: "", styleId: ""
 };
 
-// Proxy image URL to avoid CORS/hotlink issues
 function proxyImg(url) {
   if (!url) return "";
-  // Use allorigins as a CORS proxy for external images
   return `https://images.weserv.nl/?url=${encodeURIComponent(url)}&w=500&h=400&fit=cover&output=webp`;
 }
 
-// Collection code — shared across devices
-function getCollectionCode() {
-  return localStorage.getItem("sole-collection-code") || null;
-}
-function saveCollectionCode(code) {
-  localStorage.setItem("sole-collection-code", code.trim().toLowerCase());
-}
+function getCollectionCode() { return localStorage.getItem("sole-collection-code") || null; }
+function saveCollectionCode(code) { localStorage.setItem("sole-collection-code", code.trim().toLowerCase()); }
 
-// Compress image to max 800px and upload to Supabase Storage
 async function compressAndUpload(file, path) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -42,26 +34,20 @@ async function compressAndUpload(file, path) {
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
       canvas.toBlob(async (blob) => {
-        console.log("Uploading to Supabase Storage:", path, "size:", blob.size);
         const { data, error } = await supabase.storage
           .from("sneaker-photos")
           .upload(path, blob, { contentType: "image/jpeg", upsert: true });
-        if (error) {
-          console.error("Storage upload error:", error.message, error);
-          resolve(""); return;
-        }
-        console.log("Upload success:", data);
+        if (error) { resolve(""); return; }
         const { data: { publicUrl } } = supabase.storage.from("sneaker-photos").getPublicUrl(path);
-        console.log("Public URL:", publicUrl);
         resolve(publicUrl);
       }, "image/jpeg", 0.8);
     };
-    img.onerror = (e) => { console.error("Image load error", e); resolve(""); };
+    img.onerror = () => resolve("");
     img.src = url;
   });
 }
 
-// Single API call: read label image + web search for all details
+// Call 1: Read label + get retail/year only (NO web photo search = cheaper)
 async function readLabelAndLookup(file, apiKey) {
   const base64 = await new Promise((res, rej) => {
     const r = new FileReader();
@@ -82,12 +68,9 @@ async function readLabelAndLookup(file, apiKey) {
           { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
           { type: "text", text: `This is a sneaker box label. Do two things:
 1. Read the label and extract: brand, model, colorway, size (US men's), styleId (product/style code), barcode (UPC digits only)
-2. Search the web for this sneaker using the style code or brand+model, and find:
-   - Original retail price (MSRP) in USD — number only
-   - Release year — 4 digits
-   - A direct image URL from ONLY these domains (they allow hotlinking): image.goat.com, images.stockx.com, cdn.flightclub.com, sneakernews.com/wp-content/uploads/, nicekicks.com/files/. Do NOT use retailer sites like footdistrict, footlocker, jdsports, zalando.
+2. Search the web for this sneaker using the style code or brand+model to find: original retail price (MSRP) in USD (number only) and release year (4 digits only).
 
-Return ONLY a single JSON object with all fields: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"9.5","styleId":"IO9926 001","barcode":"198488545936","retailPrice":"160","releaseYear":"2024","webPhotoUrl":""}. No markdown, just JSON.` }
+Return ONLY a single JSON object: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"9.5","styleId":"IO9926 001","barcode":"198488545936","retailPrice":"160","releaseYear":"2024"}. No markdown, just JSON.` }
         ]
       }]
     })
@@ -100,7 +83,7 @@ Return ONLY a single JSON object with all fields: {"brand":"Nike","model":"Air M
   return JSON.parse(jsonMatch[0]);
 }
 
-// Cache lookup results in localStorage to avoid repeat API calls
+// Cache for all lookups
 const LOOKUP_CACHE_KEY = "sole-lookup-cache";
 function getCached(key) {
   try { const c = JSON.parse(localStorage.getItem(LOOKUP_CACHE_KEY) || "{}"); return c[key] || null; } catch { return null; }
@@ -109,20 +92,18 @@ function setCached(key, value) {
   try { const c = JSON.parse(localStorage.getItem(LOOKUP_CACHE_KEY) || "{}"); c[key] = value; localStorage.setItem(LOOKUP_CACHE_KEY, JSON.stringify(c)); } catch {}
 }
 
-// Single unified web lookup — used for both manual entry and "Update from web"
-async function webLookup(query, apiKey) {
-  const cached = getCached(query);
-  if (cached) { console.log("Cache hit:", query); return cached; }
+// Call 2 (opt-in): Web lookup for manual entry or finding web photo
+async function webLookup(query, apiKey, includePhoto = false) {
+  const cacheKey = `${query}:${includePhoto}`;
+  const cached = getCached(cacheKey);
+  if (cached) { console.log("Cache hit:", cacheKey); return cached; }
 
-  const prompt = `Search the web for sneaker: "${query}". Find ALL of the following:
-1. Brand (e.g. Nike, Adidas, Jordan)
-2. Model name (e.g. Air Max 95, Yeezy Boost 350)
-3. Colorway (e.g. Black/Neon Yellow)
-4. US size if determinable from a UPC code
-5. Style/product code (e.g. IO9926-001)
-6. Original retail price MSRP in USD — number only
-7. Release year — 4 digits
-8. A direct image URL from ONLY these hotlink-friendly domains: image.goat.com, images.stockx.com, cdn.flightclub.com, sneakernews.com/wp-content/uploads/, nicekicks.com/files/. Do NOT use footdistrict, footlocker, jdsports, zalando or other retailers.
+  const photoInstruction = includePhoto
+    ? `8. A direct image URL from ONLY these hotlink-friendly domains: image.goat.com, images.stockx.com, cdn.flightclub.com, sneakernews.com/wp-content/uploads/, nicekicks.com/files/. Do NOT use footdistrict, footlocker, jdsports, zalando or any retailer. Leave webPhotoUrl empty string if not found from these domains.`
+    : `8. Leave webPhotoUrl as empty string — do not search for images.`;
+
+  const prompt = `Search the web for sneaker: "${query}". Find:
+1. Brand, 2. Model name, 3. Colorway, 4. US size (if UPC), 5. Style/product code, 6. Retail price MSRP (number only), 7. Release year (4 digits), ${photoInstruction}
 
 Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"IO9926 001","retailPrice":"160","releaseYear":"2024","webPhotoUrl":""}. No markdown.`;
 
@@ -136,10 +117,7 @@ Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Ye
         messages: [{ role: "user", content: prompt }]
       })
     });
-    if (response.status === 429) {
-      await new Promise(r => setTimeout(r, 3000));
-      return webLookup(query, apiKey);
-    }
+    if (response.status === 429) { await new Promise(r => setTimeout(r, 3000)); return webLookup(query, apiKey, includePhoto); }
     if (!response.ok) return null;
     const data = await response.json();
     const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
@@ -147,7 +125,7 @@ Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Ye
     if (match) {
       const parsed = JSON.parse(match[0]);
       console.log("Lookup result:", parsed);
-      setCached(query, parsed);
+      setCached(cacheKey, parsed);
       return parsed;
     }
   } catch (e) { console.error("Lookup error:", e); }
@@ -176,14 +154,14 @@ function conditionColor(c) {
 }
 
 const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
-
 function isBlobUrl(url) { return url && url.startsWith("blob:"); }
 
 function dbToForm(s) {
   return {
     id: s.id, brand: s.brand || "", model: s.model || "", colorway: s.colorway || "",
     size: s.size || "", purchasePrice: s.purchase_price || "", currentValue: s.current_value || "",
-    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", webPhotoUrl: s.web_photo_url || "", condition: s.condition || "Excellent",
+    retailPrice: s.retail_price || "", releaseYear: s.release_year || "", webPhotoUrl: s.web_photo_url || "",
+    condition: s.condition || "Excellent",
     photoUrl: isBlobUrl(s.photo_url) ? "" : (s.photo_url || ""),
     labelPhotoUrl: isBlobUrl(s.label_photo_url) ? "" : (s.label_photo_url || ""),
     barcode: s.barcode || "", styleId: s.style_id || ""
@@ -209,6 +187,7 @@ export default function SneakerCatalog() {
   const [manualCode, setManualCode] = useState("");
   const [manualStyle, setManualStyle] = useState("");
   const [lookingUp, setLookingUp] = useState(false);
+  const [fetchingPhoto, setFetchingPhoto] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [labelPreview, setLabelPreview] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -217,7 +196,6 @@ export default function SneakerCatalog() {
   const labelPhotoRef = useRef();
   const csvRef = useRef();
 
-  // Load sneakers when collection code is set
   useEffect(() => {
     if (!collectionCode) { setLoading(false); return; }
     setLoading(true);
@@ -245,15 +223,13 @@ export default function SneakerCatalog() {
     if (!file) return;
     const labelBlobUrl = URL.createObjectURL(file);
     setLabelPreview(labelBlobUrl);
-    setScanStatus("Reading label & looking up details…"); setLookingUp(true);
+    setScanStatus("Reading label…"); setLookingUp(true);
     try {
-      // Single API call: read label + web search for retail/year/photo
       const result = await readLabelAndLookup(file, API_KEY);
       if (result && (result.brand || result.model)) {
         setScanFound(result);
         setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelBlobUrl }));
         setAddMode("form");
-        // Upload label photo to Supabase Storage in background
         setScanStatus("Uploading label photo…");
         const labelPath = `labels/${Date.now()}-label.jpg`;
         const labelStorageUrl = await compressAndUpload(file, labelPath);
@@ -276,12 +252,11 @@ export default function SneakerCatalog() {
     setScanStatus("Searching…"); setLookingUp(true);
     try {
       const query = manualStyle.trim() || manualCode.trim();
-      const result = await webLookup(query, API_KEY);
+      const result = await webLookup(query, API_KEY, false);
       if (result && (result.brand || result.model)) {
         setScanFound(result);
         setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
-        setAddMode("form");
-        setScanStatus("");
+        setAddMode("form"); setScanStatus("");
       } else {
         setScanFound({ barcode: manualCode, styleId: manualStyle });
         setForm(f => ({ ...f, barcode: manualCode, styleId: manualStyle }));
@@ -294,18 +269,33 @@ export default function SneakerCatalog() {
     }
   };
 
+  // Opt-in: find web photo only when explicitly requested
+  const handleFindWebPhoto = async () => {
+    if (!form.brand && !form.model && !form.styleId) return;
+    setFetchingPhoto(true);
+    const query = form.styleId || `${form.brand} ${form.model} ${form.colorway || ""}`.trim();
+    const result = await webLookup(query, API_KEY, true);
+    setFetchingPhoto(false);
+    if (result?.webPhotoUrl) {
+      setForm(f => ({ ...f, webPhotoUrl: result.webPhotoUrl }));
+    } else {
+      setScanStatus("⚠️ No web photo found.");
+      setTimeout(() => setScanStatus(""), 3000);
+    }
+  };
+
+  // Update from web: refresh retail/year only (no photo)
   const handleUpdateFromWeb = async () => {
     if (!form.brand && !form.model && !form.styleId) return;
     setScanStatus("Updating from web…"); setLookingUp(true);
     const query = form.styleId || `${form.brand} ${form.model} ${form.colorway || ""}`.trim();
-    const result = await webLookup(query, API_KEY);
+    const result = await webLookup(query, API_KEY, false);
     setLookingUp(false);
     if (result) {
       setForm(f => ({
         ...f,
         retailPrice: result.retailPrice || f.retailPrice,
         releaseYear: result.releaseYear || f.releaseYear,
-        webPhotoUrl: result.webPhotoUrl || f.webPhotoUrl
       }));
       setScanStatus(result.retailPrice || result.releaseYear ? "✅ Updated!" : "⚠️ Nothing found.");
     } else {
@@ -339,13 +329,11 @@ export default function SneakerCatalog() {
   const addSneaker = async () => {
     if (!form.brand || !form.model) return;
     setSaving(true);
-    // Upload personal photo if it's a new file (blob URL)
     let photoUrl = form.photoUrl;
     if (form.photo && form.photoUrl.startsWith("blob:")) {
       const path = `sneakers/${Date.now()}-photo.jpg`;
       photoUrl = await compressAndUpload(form.photo, path) || form.photoUrl;
     }
-    // Upload label photo if it's still a blob URL
     let labelPhotoUrl = form.labelPhotoUrl;
     if (form.labelPhoto && form.labelPhotoUrl.startsWith("blob:")) {
       const path = `labels/${Date.now()}-label.jpg`;
@@ -355,7 +343,9 @@ export default function SneakerCatalog() {
       device_id: collectionCode,
       brand: form.brand, model: form.model, colorway: form.colorway,
       size: form.size, purchase_price: form.purchasePrice, current_value: form.currentValue,
-      retail_price: form.retailPrice || "", release_year: form.releaseYear || "", web_photo_url: form.webPhotoUrl || "", condition: form.condition, photo_url: photoUrl || "", label_photo_url: labelPhotoUrl || "",
+      retail_price: form.retailPrice || "", release_year: form.releaseYear || "",
+      web_photo_url: form.webPhotoUrl || "", condition: form.condition,
+      photo_url: photoUrl || "", label_photo_url: labelPhotoUrl || "",
       barcode: form.barcode || "", style_id: form.styleId || ""
     };
     if (editingId) {
@@ -401,10 +391,8 @@ export default function SneakerCatalog() {
         <div style={{ background: "#fff", border: "1px solid #e8e6e1", borderRadius: 16, padding: 28 }}>
           <div style={{ fontSize: 12, fontWeight: 500, color: "#888", letterSpacing: ".04em", textTransform: "uppercase", marginBottom: 8 }}>Collection Code</div>
           <input className="inp" placeholder="e.g. slingman-kicks" value={codeInput}
-            onChange={e => setCodeInput(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleSetCode()}
-            style={{ marginBottom: 12 }} />
-          <div style={{ fontSize: 12, color: "#aaa", marginBottom: 16 }}>Use the same code on all your devices to share your collection. Pick anything memorable.</div>
+            onChange={e => setCodeInput(e.target.value)} onKeyDown={e => e.key === "Enter" && handleSetCode()} style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 12, color: "#aaa", marginBottom: 16 }}>Use the same code on all your devices to share your collection.</div>
           <button onClick={handleSetCode} disabled={!codeInput.trim()}
             style={{ width: "100%", background: "#111", color: "#fff", border: "none", borderRadius: 8, padding: "10px 22px", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>
             Enter Collection
@@ -442,6 +430,7 @@ export default function SneakerCatalog() {
         ::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-thumb{background:#ddd;border-radius:3px}
       `}</style>
 
+      {/* Header */}
       <div style={{ borderBottom: "1px solid #e8e6e1", background: "#fff", position: "sticky", top: 0, zIndex: 100 }}>
         <div style={{ maxWidth: 1100, margin: "0 auto", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 60 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
@@ -462,6 +451,8 @@ export default function SneakerCatalog() {
       </div>
 
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: "32px 24px" }}>
+
+        {/* CATALOG */}
         {view === "catalog" && <>
           {sneakers.length > 0 && (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 32 }}>
@@ -494,7 +485,7 @@ export default function SneakerCatalog() {
                   <div style={{ aspectRatio: "4/3", background: "#f5f4f0", borderRadius: "12px 12px 0 0", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {(s.photoUrl || s.webPhotoUrl || s.labelPhotoUrl)
                       ? <img src={s.photoUrl || proxyImg(s.webPhotoUrl) || s.labelPhotoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                          onError={e => { e.target.onerror=null; e.target.style.display="none"; e.target.parentNode.innerHTML='<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.2"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>'; }} />
+                          onError={e => { e.target.onerror = null; e.target.style.display = "none"; }} />
                       : <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1.2"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
                   </div>
                   <div style={{ padding: "14px 16px" }}>
@@ -525,9 +516,11 @@ export default function SneakerCatalog() {
           )}
         </>}
 
+        {/* ADD / EDIT */}
         {view === "add" && (
           <div style={{ maxWidth: 560, margin: "0 auto" }}>
             <h1 style={{ fontFamily: "'DM Serif Display',serif", fontSize: 28, marginBottom: 6 }}>{editingId ? "Edit Sneaker" : "Add Sneaker"}</h1>
+
             {addMode === "scan" && !editingId && <>
               <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>Snap a photo of the box label — Claude will read the brand, model, colorway, size, and style code automatically.</p>
               <label style={{ display: "block", marginBottom: 16, cursor: "pointer" }}>
@@ -553,16 +546,20 @@ export default function SneakerCatalog() {
                 <button className="btn btn-ghost" onClick={() => setAddMode("form")} style={{ fontSize: 12, color: "#aaa", border: "none" }}>Skip — fill in manually</button>
               </div>
             </>}
+
             {(addMode === "form" || editingId) && <>
-              {editingId && (
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
-                  <button className="btn btn-ghost" onClick={handleUpdateFromWeb} disabled={lookingUp}
-                    style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
-                    {lookingUp ? "🔍 Searching…" : "🌐 Update from web"}
+              {/* Action buttons */}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 16, flexWrap: "wrap" }}>
+                {editingId && (
+                  <button className="btn btn-ghost" onClick={handleUpdateFromWeb} disabled={lookingUp} style={{ fontSize: 13 }}>
+                    {lookingUp ? "🔍 Searching…" : "🔄 Update retail & year"}
                   </button>
-                </div>
-              )}
-              {scanStatus && editingId && (
+                )}
+                <button className="btn btn-ghost" onClick={handleFindWebPhoto} disabled={fetchingPhoto} style={{ fontSize: 13 }}>
+                  {fetchingPhoto ? "🔍 Finding…" : "🌐 Find web photo"}
+                </button>
+              </div>
+              {scanStatus && (
                 <div style={{ background: "#f5f4f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#555", marginBottom: 12 }}>{scanStatus}</div>
               )}
               {scanFound && !editingId && (
@@ -604,9 +601,11 @@ export default function SneakerCatalog() {
                     <div>
                       <div style={{ fontSize: 11, color: "#aaa", textAlign: "center", marginBottom: 5 }}>🌐 Web Photo</div>
                       <div style={{ background: "#f5f4f0", borderRadius: 8, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", border: "1px solid #e8e6e1" }}>
-                        {form.webPhotoUrl
-                          ? <img src={`https://images.weserv.nl/?url=${encodeURIComponent(form.webPhotoUrl)}&w=400&h=400&fit=cover&output=webp`} alt="web" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { e.target.style.display="none"; e.target.nextSibling && (e.target.nextSibling.style.display="flex"); }} />
-                          : <div style={{ fontSize: 11, color: "#ccc", textAlign: "center", padding: 8 }}>Auto-filled on scan</div>}
+                        {fetchingPhoto
+                          ? <div className="pulse" style={{ fontSize: 11, color: "#aaa" }}>Searching…</div>
+                          : form.webPhotoUrl
+                          ? <img src={proxyImg(form.webPhotoUrl)} alt="web" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { e.target.style.display = "none"; }} />
+                          : <div style={{ fontSize: 11, color: "#ccc", textAlign: "center", padding: 8 }}>Tap "Find web photo"</div>}
                       </div>
                     </div>
                     <div>
@@ -642,6 +641,7 @@ export default function SneakerCatalog() {
           </div>
         )}
 
+        {/* DETAIL */}
         {view === "detail" && selected && (() => {
           const s = sneakers.find(x => x.id === selected.id) || selected;
           const gain = s.currentValue && s.purchasePrice ? parseFloat(s.currentValue) - parseFloat(s.purchasePrice) : null;
@@ -649,27 +649,25 @@ export default function SneakerCatalog() {
             <div style={{ maxWidth: 700, margin: "0 auto" }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32, alignItems: "start" }}>
                 <div style={{ display: "grid", gap: 10 }}>
-                  {/* Primary photo: my photo > web photo > placeholder */}
                   <div style={{ background: "#f5f4f0", borderRadius: 14, aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
                     {s.photoUrl
                       ? <img src={s.photoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                       : s.webPhotoUrl
-                      ? <img src={proxyImg(s.webPhotoUrl)} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
+                      ? <img src={proxyImg(s.webPhotoUrl)} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display = "none"} />
                       : s.labelPhotoUrl
-                      ? <img src={s.labelPhotoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
+                      ? <img src={s.labelPhotoUrl} alt={s.model} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => e.target.style.display = "none"} />
                       : <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2"/></svg>}
                   </div>
-                  {/* Thumbnails row */}
                   {(s.photoUrl || s.webPhotoUrl || s.labelPhotoUrl) && (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
                       {[
-                        { url: s.webPhotoUrl ? `https://images.weserv.nl/?url=${encodeURIComponent(s.webPhotoUrl)}&w=200&h=200&fit=cover&output=webp` : "", label: "🌐 Web" },
+                        { url: s.webPhotoUrl ? proxyImg(s.webPhotoUrl) : "", label: "🌐 Web" },
                         { url: s.photoUrl, label: "📸 Mine" },
                         { url: s.labelPhotoUrl, label: "🏷️ Label" },
                       ].map(({ url, label }) => (
                         <div key={label} style={{ background: "#f5f4f0", borderRadius: 8, overflow: "hidden", aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", border: "1px solid #e8e6e1" }}>
                           {url
-                            ? <img src={url} alt={label} style={{ width: "100%", height: "80%", objectFit: "cover" }} onError={e => e.target.style.display="none"} />
+                            ? <img src={url} alt={label} style={{ width: "100%", height: "80%", objectFit: "cover" }} onError={e => e.target.style.display = "none"} />
                             : <div style={{ fontSize: 14, opacity: .3 }}>{label.split(" ")[0]}</div>}
                           <div style={{ fontSize: 9, color: "#aaa", marginTop: 2 }}>{label.split(" ")[1]}</div>
                         </div>
