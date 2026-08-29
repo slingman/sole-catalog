@@ -47,18 +47,13 @@ async function compressAndUpload(file, path) {
   });
 }
 
-const CLAUDE_MODEL = "claude-haiku-4-5-20251001";
-
-async function callClaude(apiKey, content, maxTokens) {
-  return fetch("https://api.anthropic.com/v1/messages", {
+// Calls our own /api/claude serverless function, which holds the Anthropic
+// API key server-side — the browser never sees it.
+async function callClaude(content, maxTokens) {
+  return fetch("/api/claude", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-    body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: maxTokens,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content }]
-    })
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, maxTokens })
   });
 }
 
@@ -69,7 +64,7 @@ function extractJson(data) {
 }
 
 // Call 1: Read label + get retail/year only (NO web photo search = cheaper)
-async function readLabelAndLookup(file, apiKey) {
+async function readLabelAndLookup(file) {
   const base64 = await new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(r.result.split(",")[1]);
@@ -84,7 +79,7 @@ async function readLabelAndLookup(file, apiKey) {
 
 Return ONLY a single JSON object: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"9.5","styleId":"IO9926 001","barcode":"198488545936","retailPrice":"160","releaseYear":"2024"}. No markdown, just JSON.` }
   ];
-  const response = await callClaude(apiKey, content, 1024);
+  const response = await callClaude(content, 1024);
   if (!response.ok) throw new Error(`API error ${response.status}`);
   const data = await response.json();
   const result = extractJson(data);
@@ -107,7 +102,7 @@ function buildLookupQuery(form) {
 
 // Call 2 (opt-in): Web lookup for manual entry or finding web photo
 const MAX_RATE_LIMIT_RETRIES = 3;
-async function webLookup(query, apiKey, includePhoto = false, retriesLeft = MAX_RATE_LIMIT_RETRIES) {
+async function webLookup(query, includePhoto = false, retriesLeft = MAX_RATE_LIMIT_RETRIES) {
   const cacheKey = `${query}:${includePhoto}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
@@ -122,10 +117,10 @@ async function webLookup(query, apiKey, includePhoto = false, retriesLeft = MAX_
 Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"IO9926 001","retailPrice":"160","releaseYear":"2024","webPhotoUrl":""}. No markdown.`;
 
   try {
-    const response = await callClaude(apiKey, prompt, 512);
+    const response = await callClaude(prompt, 512);
     if (response.status === 429 && retriesLeft > 0) {
       await new Promise(r => setTimeout(r, 3000));
-      return webLookup(query, apiKey, includePhoto, retriesLeft - 1);
+      return webLookup(query, includePhoto, retriesLeft - 1);
     }
     if (!response.ok) return null;
     const data = await response.json();
@@ -159,7 +154,6 @@ function conditionColor(c) {
   return { Deadstock: "#22c55e", Excellent: "#3b82f6", Good: "#f59e0b", Fair: "#f97316", Worn: "#ef4444" }[c] || "#999";
 }
 
-const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 function isBlobUrl(url) { return url && url.startsWith("blob:"); }
 
 function dbToForm(s) {
@@ -232,7 +226,7 @@ export default function SneakerCatalog() {
     setLabelPreview(labelBlobUrl);
     setScanStatus("Reading label…"); setLookingUp(true);
     try {
-      const result = await readLabelAndLookup(file, API_KEY);
+      const result = await readLabelAndLookup(file);
       if (result && (result.brand || result.model)) {
         setScanFound(result);
         setForm(f => ({ ...f, ...result, labelPhoto: file, labelPhotoUrl: labelBlobUrl }));
@@ -259,7 +253,7 @@ export default function SneakerCatalog() {
     setScanStatus("Searching…"); setLookingUp(true);
     try {
       const query = manualStyle.trim() || manualCode.trim();
-      const result = await webLookup(query, API_KEY, false);
+      const result = await webLookup(query, false);
       if (result && (result.brand || result.model)) {
         setScanFound(result);
         setForm(f => ({ ...f, ...result, barcode: manualCode.trim() || f.barcode }));
@@ -281,7 +275,7 @@ export default function SneakerCatalog() {
     if (!form.brand && !form.model && !form.styleId) return;
     setFetchingPhoto(true);
     const query = buildLookupQuery(form);
-    const result = await webLookup(query, API_KEY, true);
+    const result = await webLookup(query, true);
     setFetchingPhoto(false);
     if (result?.webPhotoUrl) {
       setForm(f => ({ ...f, webPhotoUrl: result.webPhotoUrl }));
@@ -296,7 +290,7 @@ export default function SneakerCatalog() {
     if (!form.brand && !form.model && !form.styleId) return;
     setScanStatus("Updating from web…"); setLookingUp(true);
     const query = buildLookupQuery(form);
-    const result = await webLookup(query, API_KEY, false);
+    const result = await webLookup(query, false);
     setLookingUp(false);
     if (result) {
       setForm(f => ({
