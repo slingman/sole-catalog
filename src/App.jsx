@@ -47,6 +47,27 @@ async function compressAndUpload(file, path) {
   });
 }
 
+const CLAUDE_MODEL = "claude-haiku-4-5-20251001";
+
+async function callClaude(apiKey, content, maxTokens) {
+  return fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: maxTokens,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      messages: [{ role: "user", content }]
+    })
+  });
+}
+
+function extractJson(data) {
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  const match = text.match(/\{[\s\S]*?\}/);
+  return match ? JSON.parse(match[0]) : null;
+}
+
 // Call 1: Read label + get retail/year only (NO web photo search = cheaper)
 async function readLabelAndLookup(file, apiKey) {
   const base64 = await new Promise((res, rej) => {
@@ -55,32 +76,20 @@ async function readLabelAndLookup(file, apiKey) {
     r.onerror = rej;
     r.readAsDataURL(file);
   });
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
-          { type: "text", text: `This is a sneaker box label. Do two things:
+  const content = [
+    { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
+    { type: "text", text: `This is a sneaker box label. Do two things:
 1. Read the label and extract: brand, model, colorway, size (US men's), styleId (product/style code), barcode (UPC digits only)
 2. Search the web for this sneaker using the style code or brand+model to find: original retail price (MSRP) in USD (number only) and release year (4 digits only).
 
 Return ONLY a single JSON object: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"9.5","styleId":"IO9926 001","barcode":"198488545936","retailPrice":"160","releaseYear":"2024"}. No markdown, just JSON.` }
-        ]
-      }]
-    })
-  });
+  ];
+  const response = await callClaude(apiKey, content, 1024);
   if (!response.ok) throw new Error(`API error ${response.status}`);
   const data = await response.json();
-  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-  const jsonMatch = text.match(/\{[\s\S]*?\}/);
-  if (!jsonMatch) throw new Error("No JSON returned");
-  return JSON.parse(jsonMatch[0]);
+  const result = extractJson(data);
+  if (!result) throw new Error("No JSON returned");
+  return result;
 }
 
 // Cache for all lookups
@@ -92,11 +101,16 @@ function setCached(key, value) {
   try { const c = JSON.parse(localStorage.getItem(LOOKUP_CACHE_KEY) || "{}"); c[key] = value; localStorage.setItem(LOOKUP_CACHE_KEY, JSON.stringify(c)); } catch {}
 }
 
+function buildLookupQuery(form) {
+  return form.styleId || `${form.brand} ${form.model} ${form.colorway || ""}`.trim();
+}
+
 // Call 2 (opt-in): Web lookup for manual entry or finding web photo
-async function webLookup(query, apiKey, includePhoto = false) {
+const MAX_RATE_LIMIT_RETRIES = 3;
+async function webLookup(query, apiKey, includePhoto = false, retriesLeft = MAX_RATE_LIMIT_RETRIES) {
   const cacheKey = `${query}:${includePhoto}`;
   const cached = getCached(cacheKey);
-  if (cached) { console.log("Cache hit:", cacheKey); return cached; }
+  if (cached) return cached;
 
   const photoInstruction = includePhoto
     ? `8. A direct image URL from ONLY these hotlink-friendly domains: image.goat.com, images.stockx.com, cdn.flightclub.com, sneakernews.com/wp-content/uploads/, nicekicks.com/files/. Do NOT use footdistrict, footlocker, jdsports, zalando or any retailer. Leave webPhotoUrl empty string if not found from these domains.`
@@ -108,28 +122,20 @@ async function webLookup(query, apiKey, includePhoto = false) {
 Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"IO9926 001","retailPrice":"160","releaseYear":"2024","webPhotoUrl":""}. No markdown.`;
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001", max_tokens: 512,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-    if (response.status === 429) { await new Promise(r => setTimeout(r, 3000)); return webLookup(query, apiKey, includePhoto); }
+    const response = await callClaude(apiKey, prompt, 512);
+    if (response.status === 429 && retriesLeft > 0) {
+      await new Promise(r => setTimeout(r, 3000));
+      return webLookup(query, apiKey, includePhoto, retriesLeft - 1);
+    }
     if (!response.ok) return null;
     const data = await response.json();
-    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-    const match = text.match(/\{[\s\S]*?\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      console.log("Lookup result:", parsed);
-      setCached(cacheKey, parsed);
-      return parsed;
-    }
-  } catch (e) { console.error("Lookup error:", e); }
-  return null;
+    const parsed = extractJson(data);
+    if (parsed) setCached(cacheKey, parsed);
+    return parsed;
+  } catch (e) {
+    console.error("Lookup error:", e);
+    return null;
+  }
 }
 
 function parseCsv(text) {
@@ -217,6 +223,7 @@ export default function SneakerCatalog() {
   const goBack = () => {
     setView("catalog"); setAddMode("scan"); setScanFound(null);
     setScanStatus(""); setLabelPreview(null); setEditingId(null); setForm(EMPTY_FORM);
+    setManualCode(""); setManualStyle("");
   };
 
   const handleLabelScan = async (file) => {
@@ -273,7 +280,7 @@ export default function SneakerCatalog() {
   const handleFindWebPhoto = async () => {
     if (!form.brand && !form.model && !form.styleId) return;
     setFetchingPhoto(true);
-    const query = form.styleId || `${form.brand} ${form.model} ${form.colorway || ""}`.trim();
+    const query = buildLookupQuery(form);
     const result = await webLookup(query, API_KEY, true);
     setFetchingPhoto(false);
     if (result?.webPhotoUrl) {
@@ -288,7 +295,7 @@ export default function SneakerCatalog() {
   const handleUpdateFromWeb = async () => {
     if (!form.brand && !form.model && !form.styleId) return;
     setScanStatus("Updating from web…"); setLookingUp(true);
-    const query = form.styleId || `${form.brand} ${form.model} ${form.colorway || ""}`.trim();
+    const query = buildLookupQuery(form);
     const result = await webLookup(query, API_KEY, false);
     setLookingUp(false);
     if (result) {
