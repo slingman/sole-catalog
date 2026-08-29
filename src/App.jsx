@@ -48,12 +48,13 @@ async function compressAndUpload(file, path) {
 }
 
 // Calls our own /api/claude serverless function, which holds the Anthropic
-// API key server-side — the browser never sees it.
-async function callClaude(content, maxTokens) {
+// API key server-side — the browser never sees it. maxSearches caps how many
+// times Claude can invoke the (separately billed) web_search tool per call.
+async function callClaude(content, maxTokens, maxSearches = 1) {
   return fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, maxTokens })
+    body: JSON.stringify({ content, maxTokens, maxSearches })
   });
 }
 
@@ -117,7 +118,7 @@ async function webLookup(query, includePhoto = false, retriesLeft = MAX_RATE_LIM
 Return ONLY JSON: {"brand":"Nike","model":"Air Max 95","colorway":"Black/Neon Yellow","size":"","styleId":"IO9926 001","retailPrice":"160","releaseYear":"2024","webPhotoUrl":""}. No markdown.`;
 
   try {
-    const response = await callClaude(prompt, 512);
+    const response = await callClaude(prompt, 512, includePhoto ? 2 : 1);
     if (response.status === 429 && retriesLeft > 0) {
       await new Promise(r => setTimeout(r, 3000));
       return webLookup(query, includePhoto, retriesLeft - 1);

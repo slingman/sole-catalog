@@ -12,12 +12,12 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { content, maxTokens } = req.body || {};
+  const { content, maxTokens, maxSearches } = req.body || {};
   if (!content || !maxTokens) {
     res.status(400).json({ error: "Missing content or maxTokens" });
     return;
   }
 
-  const { status, data } = await proxyClaudeRequest(content, maxTokens, apiKey);
+  const { status, data } = await proxyClaudeRequest(content, maxTokens, apiKey, maxSearches);
   res.status(status).json(data);
 }

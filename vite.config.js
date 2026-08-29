@@ -16,9 +16,9 @@ function claudeApiDevProxy(apiKey) {
         }
         let body = '';
         for await (const chunk of req) body += chunk;
-        let content, maxTokens;
+        let content, maxTokens, maxSearches;
         try {
-          ({ content, maxTokens } = JSON.parse(body || '{}'));
+          ({ content, maxTokens, maxSearches } = JSON.parse(body || '{}'));
         } catch {
           res.statusCode = 400;
           res.end(JSON.stringify({ error: 'Invalid JSON' }));
@@ -29,7 +29,7 @@ function claudeApiDevProxy(apiKey) {
           res.end(JSON.stringify({ error: 'Missing content or maxTokens' }));
           return;
         }
-        const { status, data } = await proxyClaudeRequest(content, maxTokens, apiKey);
+        const { status, data } = await proxyClaudeRequest(content, maxTokens, apiKey, maxSearches);
         res.statusCode = status;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify(data));

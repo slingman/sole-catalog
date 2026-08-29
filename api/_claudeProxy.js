@@ -1,6 +1,6 @@
 const CLAUDE_MODEL = "claude-haiku-4-5-20251001";
 
-export async function proxyClaudeRequest(content, maxTokens, apiKey) {
+export async function proxyClaudeRequest(content, maxTokens, apiKey, maxSearches = 1) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -11,7 +11,7 @@ export async function proxyClaudeRequest(content, maxTokens, apiKey) {
     body: JSON.stringify({
       model: CLAUDE_MODEL,
       max_tokens: maxTokens,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: maxSearches }],
       messages: [{ role: "user", content }],
     }),
   });
